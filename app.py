@@ -214,6 +214,21 @@ def _build_opportunities(uploads, postcodes_data):
                 "priority":"High" if g.get("sev")=="critical" else "Medium",
             })
 
+    for upload in uploads:
+        if upload.get("source_app") == "building_intelligence":
+            for b in upload.get("briefings",[]):
+                pc      = b.get("postcode","")
+                company = b.get("company","") or pc
+                gaps    = b.get("gaps",[])
+                for g in gaps[:2]:
+                    opps.append({
+                        "park":     company,
+                        "postcode": pc,
+                        "gap":      g.get("title",""),
+                        "service":  g.get("service","").split(chr(10))[0],
+                        "reason":   g.get("desc","")[:100],
+                        "priority": "High" if g.get("sev")=="critical" else "Medium",
+                    })
     opps.sort(key=lambda x: 0 if x["priority"]=="High" else 1)
     return opps
 
@@ -443,6 +458,43 @@ def generate_master_pdf(uploads, postcodes_data, report_title, prepared_by):
                         S["small"]
                     ))
                     story.append(Spacer(1, 2*mm))
+
+        elif source == "building_intelligence":
+            briefings = upload.get("briefings",[])
+            story.append(Paragraph(f"{len(briefings)} saved briefings in this export", S["small"]))
+            story.append(Spacer(1,3*mm))
+
+            hdr_row = [
+                Paragraph("PROPERTY",       S["monow"]),
+                Paragraph("POSTCODE",       S["monow"]),
+                Paragraph("SCORE",          S["monow"]),
+                Paragraph("VERDICT",        S["monow"]),
+                Paragraph("TOP GAP",        S["monow"]),
+            ]
+            rows = [hdr_row]
+            for b in briefings:
+                sc = b.get("score",0)
+                sc_col = RED if sc < 50 else AMBER if sc < 70 else GREEN
+                top_gap = b.get("gaps",[{}])[0].get("title","—") if b.get("gaps") else "—"
+                rows.append([
+                    Paragraph(b.get("company","")[:30] or b.get("postcode",""), S["bold9"]),
+                    Paragraph(b.get("postcode",""), S["body"]),
+                    Paragraph(str(sc), ParagraphStyle("sc",fontName="Helvetica-Bold",fontSize=9,textColor=sc_col,leading=12)),
+                    Paragraph(b.get("verdict",b.get("scoreLabel","")), S["small"]),
+                    Paragraph(top_gap[:40], S["small"]),
+                ])
+            cws = [45*mm, 22*mm, 14*mm, 40*mm, CW-121*mm]
+            bt = Table(rows, colWidths=cws)
+            bt.setStyle(TableStyle([
+                ("BACKGROUND",    (0,0),(-1,0),  NAVY),
+                ("ROWBACKGROUNDS",(0,1),(-1,-1),  [WHITE,LGREY]),
+                ("LINEBELOW",     (0,0),(-1,-1),  0.3,MGREY),
+                ("TOPPADDING",    (0,0),(-1,-1),  5),
+                ("BOTTOMPADDING", (0,0),(-1,-1),  5),
+                ("LEFTPADDING",   (0,0),(-1,-1),  5),
+                ("VALIGN",        (0,0),(-1,-1),  "TOP"),
+            ]))
+            story.append(bt)
 
         story.append(PageBreak())
 
