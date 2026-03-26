@@ -56,9 +56,9 @@ def parse_upload(uploaded_file):
 
 def source_label(source_app):
     labels = {
-        "science_parks":        ("Science Parks",             "badge-parks"),
-        "vulnerability_scanner":("Vulnerability Scanner",     "badge-vuln"),
-        "building_intelligence":("Building Intelligence",     "badge-intel"),
+        "science_parks":        ("Science Parks",         "badge-parks"),
+        "vulnerability_scanner":("Vulnerability Scanner", "badge-vuln"),
+        "building_intelligence":("Building Intelligence", "badge-intel"),
     }
     return labels.get(source_app, (source_app, "badge-intel"))
 
@@ -76,6 +76,7 @@ def _styles():
         "bold11":S("b11", fontName="Helvetica-Bold",   fontSize=11, textColor=BLACK, leading=15),
         "mono":  S("mo",  fontName="Courier",          fontSize=7.5,textColor=GREY,  leading=10),
         "monob": S("mob", fontName="Courier-Bold",     fontSize=7.5,textColor=NAVY,  leading=10),
+        "monow": S("mow", fontName="Courier-Bold",     fontSize=7.5,textColor=WHITE, leading=10),
         "teal":  S("te",  fontName="Helvetica-Bold",   fontSize=9,  textColor=TEAL,  leading=12),
         "white": S("wh",  fontName="Helvetica",        fontSize=9,  textColor=WHITE, leading=13),
         "whiteb":S("wb",  fontName="Helvetica-Bold",   fontSize=9,  textColor=WHITE, leading=13),
@@ -113,6 +114,110 @@ def _footer_fn(title):
     return _fn
 
 
+def _build_opportunities(uploads, postcodes_data):
+    """Build a meaningful opportunity list from uploaded data."""
+    opps = []
+
+    for upload in uploads:
+        source = upload.get("source_app","")
+
+        if source == "science_parks":
+            for p in upload.get("parks", []):
+                name     = p.get("name","")
+                postcode = p.get("postcode","")
+                sector   = p.get("sector","")
+                tenants  = p.get("tenants","")
+                ofcom    = p.get("ofcom",{}) or {}
+                notes    = p.get("notes","")
+
+                # Connectivity gap
+                gigabit_pct = ofcom.get("gigabit_pct", 0) or ofcom.get("connectivity",{}).get("gigabit_pct",0)
+                try:
+                    gig = float(gigabit_pct)
+                except (TypeError, ValueError):
+                    gig = 0
+
+                if gig < 50:
+                    opps.append({
+                        "park":    name,
+                        "postcode":postcode,
+                        "gap":     f"Gigabit coverage {gig:.0f}% — below standard for innovation park",
+                        "service": "Fibre Broadband · Network-as-a-Service",
+                        "reason":  f"{tenants} tenants in {sector} sector requiring high-speed reliable connectivity",
+                        "priority":"High" if gig < 20 else "Medium",
+                    })
+                else:
+                    opps.append({
+                        "park":    name,
+                        "postcode":postcode,
+                        "gap":     "WiredScore / SmartScore certification not confirmed",
+                        "service": "WiredScore AP Services · SmartScore AP Services",
+                        "reason":  f"Certification would differentiate {name} and support premium tenant attraction",
+                        "priority":"Medium",
+                    })
+
+                # EPC
+                epc_rating = ofcom.get("epc_rating","")
+                if epc_rating and epc_rating not in ("A","B","C",""):
+                    opps.append({
+                        "park":    name,
+                        "postcode":postcode,
+                        "gap":     f"EPC {epc_rating} — below proposed 2027 minimum (C)",
+                        "service": "Smart Building Technology · Azure Managed Services",
+                        "reason":  "2027 MEES regulations risk lettability — digital infrastructure upgrades contribute to EPC improvement",
+                        "priority":"High" if epc_rating in ("E","F","G") else "Medium",
+                    })
+
+                # Multi-tenant managed IT
+                try:
+                    t_num = int(str(tenants).replace("+","").replace(",","").split()[0])
+                except (ValueError, IndexError):
+                    t_num = 0
+                if t_num >= 50:
+                    opps.append({
+                        "park":    name,
+                        "postcode":postcode,
+                        "gap":     f"{tenants} tenant organisations — managed IT opportunity",
+                        "service": "Service Guardian · Desktop Support · M365 Managed Services",
+                        "reason":  "Large multi-tenant environment with demand for managed connectivity, IT support and security",
+                        "priority":"Medium",
+                    })
+
+        elif source == "vulnerability_scanner":
+            for area in upload.get("areas", [upload]):
+                a_label = area.get("area_label","") or area.get("search_term","")
+                crit    = area.get("critical_count",0)
+                devices = area.get("device_count",0)
+                score   = str(area.get("score","")).lower()
+                if crit > 0 or score in ("red","critical"):
+                    opps.append({
+                        "park":    a_label,
+                        "postcode":"",
+                        "gap":     f"{crit} critical vulnerabilities · {devices} exposed devices",
+                        "service": "Cybersecurity Services · Managed Firewall · ISO 27001",
+                        "reason":  "Exposed devices and critical vulnerabilities represent immediate security and insurance risk",
+                        "priority":"High",
+                    })
+
+    for bld in postcodes_data:
+        pc      = bld.get("postcode","")
+        company = bld.get("company","") or pc
+        score   = bld.get("score",0)
+        gaps    = bld.get("gaps",[])
+        for g in gaps[:2]:
+            opps.append({
+                "park":    company,
+                "postcode":pc,
+                "gap":     g.get("title",""),
+                "service": g.get("service","").split("\n")[0],
+                "reason":  g.get("desc","")[:100],
+                "priority":"High" if g.get("sev")=="critical" else "Medium",
+            })
+
+    opps.sort(key=lambda x: 0 if x["priority"]=="High" else 1)
+    return opps
+
+
 def generate_master_pdf(uploads, postcodes_data, report_title, prepared_by):
     buf = io.BytesIO()
     S   = _styles()
@@ -125,14 +230,17 @@ def generate_master_pdf(uploads, postcodes_data, report_title, prepared_by):
     )
     story = []
 
-    total_parks     = sum(len(u.get("parks",[])) for u in uploads if u.get("source_app")=="science_parks")
-    total_areas     = sum(len(u.get("areas",[u])) for u in uploads if u.get("source_app")=="vulnerability_scanner")
+    total_parks     = sum(len(u.get("parks",[])) for u in uploads
+                         if u.get("source_app")=="science_parks")
+    total_areas     = sum(len(u.get("areas",[u])) for u in uploads
+                         if u.get("source_app")=="vulnerability_scanner")
     total_postcodes = len(postcodes_data)
+    opportunities   = _build_opportunities(uploads, postcodes_data)
 
     # ── COVER ──────────────────────────────────────────────────────────────
     t = Table([[Paragraph(
-        "INTERNAL  ·  MODERN NETWORKS SALES & MARKETING INTELLIGENCE  ·  NOT FOR EXTERNAL DISTRIBUTION",
-        S["whiteb"]
+        "INTERNAL  ·  MODERN NETWORKS SALES & MARKETING INTELLIGENCE  ·  "
+        "NOT FOR EXTERNAL DISTRIBUTION", S["whiteb"]
     )]], colWidths=[CW])
     t.setStyle(TableStyle([
         ("BACKGROUND",    (0,0),(-1,-1), NAVY),
@@ -155,19 +263,23 @@ def generate_master_pdf(uploads, postcodes_data, report_title, prepared_by):
     stats_data = [
         [
             Paragraph(str(len(uploads)),
-                ParagraphStyle("sn", fontName="Helvetica-Bold", fontSize=22, textColor=NAVY, leading=26)),
-            Paragraph(str(total_areas),
-                ParagraphStyle("sn2", fontName="Helvetica-Bold", fontSize=22, textColor=TEAL, leading=26)),
-            Paragraph(str(total_parks),
-                ParagraphStyle("sn3", fontName="Helvetica-Bold", fontSize=22, textColor=GREEN, leading=26)),
-            Paragraph(str(total_postcodes),
-                ParagraphStyle("sn4", fontName="Helvetica-Bold", fontSize=22, textColor=AMBER, leading=26)),
+                ParagraphStyle("sn",  fontName="Helvetica-Bold", fontSize=22,
+                               textColor=NAVY,  leading=26)),
+            Paragraph(str(total_areas + total_parks),
+                ParagraphStyle("sn2", fontName="Helvetica-Bold", fontSize=22,
+                               textColor=TEAL,  leading=26)),
+            Paragraph(str(len(opportunities)),
+                ParagraphStyle("sn3", fontName="Helvetica-Bold", fontSize=22,
+                               textColor=AMBER, leading=26)),
+            Paragraph(str(sum(1 for o in opportunities if o["priority"]=="High")),
+                ParagraphStyle("sn4", fontName="Helvetica-Bold", fontSize=22,
+                               textColor=RED,   leading=26)),
         ],
         [
-            Paragraph("Data Sources",         S["small"]),
-            Paragraph("Areas Assessed",       S["small"]),
-            Paragraph("Science Parks",        S["small"]),
-            Paragraph("Individual Buildings", S["small"]),
+            Paragraph("Data Sources",      S["small"]),
+            Paragraph("Areas / Parks",     S["small"]),
+            Paragraph("Opportunities",     S["small"]),
+            Paragraph("High Priority",     S["small"]),
         ],
     ]
     st_t = Table(stats_data, colWidths=[CW/4]*4)
@@ -183,36 +295,38 @@ def generate_master_pdf(uploads, postcodes_data, report_title, prepared_by):
     story.append(st_t)
     story.append(Spacer(1, 6*mm))
 
-    # Executive summary
     story.append(_section_bar("EXECUTIVE SUMMARY", S))
     story.append(Spacer(1, 4*mm))
 
-    sources = list(set(u.get("source_app","") for u in uploads))
+    sources     = list(set(u.get("source_app","") for u in uploads))
     source_desc = " and ".join([{
         "science_parks":        "science and innovation park data",
         "vulnerability_scanner":"commercial area vulnerability intelligence",
         "building_intelligence":"individual building assessments",
     }.get(s, s) for s in sources])
 
+    high_count = sum(1 for o in opportunities if o["priority"]=="High")
     exec_text = (
         f"This report consolidates {source_desc} across {len(uploads)} data "
         f"source{'s' if len(uploads)!=1 else ''}. "
         f"It covers"
-        f"{' '+str(total_areas)+' assessed areas,' if total_areas else ''}"
-        f"{' '+str(total_parks)+' science and innovation parks,' if total_parks else ''}"
-        f"{' and '+str(total_postcodes)+' individual building assessments.' if total_postcodes else '.'} "
+        f"{' '+str(total_areas)+' assessed areas' if total_areas else ''}"
+        f"{' and' if total_areas and total_parks else ''}"
+        f"{' '+str(total_parks)+' science and innovation parks' if total_parks else ''}"
+        f"{', and '+str(total_postcodes)+' individual building assessments' if total_postcodes else ''}. "
+        f"The analysis has identified {len(opportunities)} service opportunities "
+        f"for Modern Networks, of which {high_count} are high priority. "
         "The report is intended for internal use by Modern Networks sales and marketing teams "
         "to support territory planning, prospect identification, and meeting preparation."
     )
     story.append(Paragraph(exec_text, S["body"]))
     story.append(PageBreak())
 
-    # ── TERRITORY DATA FROM UPLOADED FILES ────────────────────────────────
+    # ── TERRITORY DATA ─────────────────────────────────────────────────────
     for upload in uploads:
-        source     = upload.get("source_app", "unknown")
-        exported   = upload.get("exported_at", "")
-        label      = upload.get("area_label","") or upload.get("search_term","")
-        rtype      = upload.get("report_type","")
+        source   = upload.get("source_app","unknown")
+        exported = upload.get("exported_at","")
+        label    = upload.get("area_label","") or upload.get("search_term","")
 
         source_names = {
             "science_parks":        "Science Parks Intelligence",
@@ -224,7 +338,7 @@ def generate_master_pdf(uploads, postcodes_data, report_title, prepared_by):
         ))
         story.append(Spacer(1, 3*mm))
         story.append(Paragraph(
-            f"Source: {source}  ·  Exported: {exported}  ·  Type: {rtype}",
+            f"Exported: {exported}",
             S["mono"]
         ))
         story.append(Spacer(1, 4*mm))
@@ -235,18 +349,24 @@ def generate_master_pdf(uploads, postcodes_data, report_title, prepared_by):
                 a_label = area.get("area_label","") or area.get("search_term","")
                 score   = area.get("score","")
                 rating  = area.get("rating","")
-                devices = area.get("device_count", 0)
-                crit    = area.get("critical_count", 0)
-                vulns   = area.get("vuln_count", 0)
-                sc_col  = RED if str(score).lower() in ("red","critical") else AMBER if str(score).lower() in ("amber","warning") else GREEN
+                devices = area.get("device_count",0)
+                crit    = area.get("critical_count",0)
+                vulns   = area.get("vuln_count",0)
+                sc_col  = (RED   if str(score).lower() in ("red","critical") else
+                           AMBER if str(score).lower() in ("amber","warning") else
+                           GREEN)
 
                 rows = [
-                    [Paragraph("AREA",    S["mono"]), Paragraph(str(a_label), S["bold9"])],
-                    [Paragraph("SCORE",   S["mono"]), Paragraph(str(score), ParagraphStyle("asc", fontName="Helvetica-Bold", fontSize=11, textColor=sc_col, leading=14))],
-                    [Paragraph("RATING",  S["mono"]), Paragraph(str(rating), S["bold9"])],
-                    [Paragraph("DEVICES", S["mono"]), Paragraph(str(devices), S["body"])],
-                    [Paragraph("CRITICAL",S["mono"]), Paragraph(str(crit), S["red"] if crit > 0 else S["body"])],
-                    [Paragraph("VULNS",   S["mono"]), Paragraph(str(vulns), S["amber"] if vulns > 0 else S["body"])],
+                    [Paragraph("AREA",     S["mono"]), Paragraph(str(a_label), S["bold9"])],
+                    [Paragraph("SCORE",    S["mono"]), Paragraph(str(score),
+                        ParagraphStyle("asc",fontName="Helvetica-Bold",fontSize=11,
+                                       textColor=sc_col,leading=14))],
+                    [Paragraph("RATING",   S["mono"]), Paragraph(str(rating),  S["bold9"])],
+                    [Paragraph("DEVICES",  S["mono"]), Paragraph(str(devices), S["body"])],
+                    [Paragraph("CRITICAL", S["mono"]),
+                     Paragraph(str(crit), S["red"] if crit > 0 else S["body"])],
+                    [Paragraph("VULNS",    S["mono"]),
+                     Paragraph(str(vulns), S["amber"] if vulns > 0 else S["body"])],
                 ]
                 at = Table(rows, colWidths=[30*mm, CW-30*mm])
                 at.setStyle(TableStyle([
@@ -259,7 +379,7 @@ def generate_master_pdf(uploads, postcodes_data, report_title, prepared_by):
                 story.append(at)
                 story.append(Spacer(1, 3*mm))
 
-                ctx = area.get("area_context", {})
+                ctx = area.get("area_context",{})
                 if ctx:
                     ctx_items = []
                     for k, v in list(ctx.items())[:8]:
@@ -280,30 +400,36 @@ def generate_master_pdf(uploads, postcodes_data, report_title, prepared_by):
                 story.append(_divider())
 
         elif source == "science_parks":
-            parks = upload.get("parks", [])
+            parks = upload.get("parks",[])
             story.append(Paragraph(f"{len(parks)} parks in this dataset", S["small"]))
             story.append(Spacer(1, 3*mm))
 
-            hdr = [Paragraph(h, S["monob"]) for h in
-                   ["PARK", "POSTCODE", "SECTOR", "TENANTS", "OPERATOR"]]
-            rows = [hdr]
+            # Table with explicit white header text
+            hdr_row = [
+                Paragraph("PARK",     S["monow"]),
+                Paragraph("POSTCODE", S["monow"]),
+                Paragraph("SECTOR",   S["monow"]),
+                Paragraph("TENANTS",  S["monow"]),
+                Paragraph("OPERATOR", S["monow"]),
+            ]
+            rows = [hdr_row]
             for p in parks:
                 rows.append([
-                    Paragraph(p.get("name","")[:35],     S["bold9"]),
-                    Paragraph(p.get("postcode",""),       S["body"]),
-                    Paragraph(p.get("sector","")[:30],    S["small"]),
-                    Paragraph(str(p.get("tenants","")),   S["body"]),
-                    Paragraph(p.get("operator","")[:30],  S["small"]),
+                    Paragraph(p.get("name","")[:35],    S["bold9"]),
+                    Paragraph(p.get("postcode",""),      S["body"]),
+                    Paragraph(p.get("sector","")[:30],   S["small"]),
+                    Paragraph(str(p.get("tenants","")),  S["body"]),
+                    Paragraph(p.get("operator","")[:30], S["small"]),
                 ])
             cws = [55*mm, 22*mm, 45*mm, 18*mm, CW-140*mm]
             pt = Table(rows, colWidths=cws)
             pt.setStyle(TableStyle([
                 ("BACKGROUND",    (0,0),(-1,0),  NAVY),
-                ("TEXTCOLOR",     (0,0),(-1,0),  WHITE),
+                ("BACKGROUND",    (0,1),(-1,-1),  WHITE),
                 ("ROWBACKGROUNDS",(0,1),(-1,-1),  [WHITE, LGREY]),
                 ("LINEBELOW",     (0,0),(-1,-1),  0.3, MGREY),
-                ("TOPPADDING",    (0,0),(-1,-1),  5),
-                ("BOTTOMPADDING", (0,0),(-1,-1),  5),
+                ("TOPPADDING",    (0,0),(-1,-1),  6),
+                ("BOTTOMPADDING", (0,0),(-1,-1),  6),
                 ("LEFTPADDING",   (0,0),(-1,-1),  5),
                 ("VALIGN",        (0,0),(-1,-1),  "TOP"),
             ]))
@@ -320,13 +446,13 @@ def generate_master_pdf(uploads, postcodes_data, report_title, prepared_by):
 
         story.append(PageBreak())
 
-    # ── INDIVIDUAL BUILDING ASSESSMENTS ───────────────────────────────────
+    # ── INDIVIDUAL BUILDING ASSESSMENTS ────────────────────────────────────
     if postcodes_data:
         story.append(_section_bar("INDIVIDUAL BUILDING ASSESSMENTS", S))
         story.append(Spacer(1, 3*mm))
         story.append(Paragraph(
             f"{len(postcodes_data)} individual building postcodes included. "
-            "For full building intelligence data, run assessments in the Building Intelligence Platform.",
+            "For full building intelligence run assessments in the Building Intelligence Platform.",
             S["italic"]
         ))
         story.append(Spacer(1, 4*mm))
@@ -334,126 +460,91 @@ def generate_master_pdf(uploads, postcodes_data, report_title, prepared_by):
         for bld in postcodes_data:
             pc      = bld.get("postcode","")
             company = bld.get("company","")
-            score   = bld.get("score", 0)
+            score   = bld.get("score",0)
             verdict = bld.get("verdict","Pending assessment")
-            gaps    = bld.get("gaps", [])
+            gaps    = bld.get("gaps",[])
             sc_col  = RED if score < 50 else AMBER if score < 70 else GREEN
 
-            title_str = f"{company} — {pc}" if company else f"Building Assessment — {pc}"
+            title_str = f"{company} — {pc}" if company else f"Building — {pc}"
             story.append(Paragraph(title_str, S["bold11"]))
             if score:
                 story.append(Paragraph(
                     f"Score: {score}/100  ·  {verdict}",
-                    ParagraphStyle("vs", fontName="Helvetica-Bold", fontSize=9,
-                                   textColor=sc_col, leading=12)
+                    ParagraphStyle("vs",fontName="Helvetica-Bold",fontSize=9,
+                                   textColor=sc_col,leading=12)
                 ))
             for g in gaps[:3]:
-                lc = RED if g.get("sev") == "critical" else AMBER
+                lc = RED if g.get("sev")=="critical" else AMBER
                 story.append(Paragraph(
                     f"● {g.get('icon','')} {g.get('title','')}",
-                    ParagraphStyle("gi", fontName="Helvetica", fontSize=8,
-                                   textColor=lc, leading=11)
+                    ParagraphStyle("gi",fontName="Helvetica",fontSize=8,
+                                   textColor=lc,leading=11)
                 ))
             story.append(Spacer(1, 4*mm))
             story.append(_divider())
 
-    # ── PRIORITISED OPPORTUNITY LIST ───────────────────────────────────────
+    # ── PRIORITISED OPPORTUNITY LIST ────────────────────────────────────────
     story.append(PageBreak())
     story.append(_section_bar("PRIORITISED OPPORTUNITY LIST", S))
     story.append(Spacer(1, 3*mm))
     story.append(Paragraph(
-        "Top opportunities across all data sources, ranked by priority.",
+        "Service opportunities identified across all data sources. "
+        "High priority items should be actioned first.",
         S["italic"]
     ))
-    story.append(Spacer(1, 4*mm))
-
-    opportunities = []
-
-    for upload in uploads:
-        if upload.get("source_app") == "vulnerability_scanner":
-            for area in upload.get("areas", [upload]):
-                score = str(area.get("score","")).lower()
-                crit  = area.get("critical_count", 0)
-                if score in ("red","critical") or crit > 0:
-                    opportunities.append({
-                        "priority": "High",
-                        "source":   "Vulnerability Scanner",
-                        "area":     area.get("area_label","") or area.get("search_term",""),
-                        "reason":   f"{crit} critical vulnerabilities · {area.get('device_count',0)} exposed devices",
-                        "service":  "Cybersecurity Services · Managed Firewall",
-                    })
-
-    for upload in uploads:
-        if upload.get("source_app") == "science_parks":
-            for p in upload.get("parks",[])[:10]:
-                opportunities.append({
-                    "priority": "Medium",
-                    "source":   "Science Parks",
-                    "area":     p.get("name",""),
-                    "reason":   f"{p.get('tenants','')} tenants · {p.get('sector','')}",
-                    "service":  "Managed Network · WiredScore AP Services · Fibre Broadband",
-                })
-
-    for bld in postcodes_data:
-        score = bld.get("score", 50)
-        opportunities.append({
-            "priority": "High" if score < 55 else "Medium",
-            "source":   "Building Intelligence",
-            "area":     bld.get("company","") or bld.get("postcode",""),
-            "reason":   f"Score {score}/100 · {bld.get('verdict','')}",
-            "service":  "WiredScore AP Services · Managed Network",
-        })
-
-    opportunities.sort(key=lambda x: 0 if x["priority"]=="High" else 1)
+    story.append(Spacer(1, 5*mm))
 
     if opportunities:
-        hdr = [Paragraph(h, S["monob"]) for h in
-               ["PRIORITY", "SOURCE", "AREA / PROPERTY", "REASON", "MN SERVICE"]]
-        opp_rows = [hdr]
-        for o in opportunities[:20]:
+        for o in opportunities[:25]:
             pc_col = RED if o["priority"]=="High" else AMBER
-            opp_rows.append([
-                Paragraph(o["priority"], ParagraphStyle("pr", fontName="Helvetica-Bold",
-                          fontSize=8, textColor=pc_col, leading=11)),
-                Paragraph(o["source"][:15],  S["small"]),
-                Paragraph(o["area"][:30],    S["bold9"]),
-                Paragraph(o["reason"][:50],  S["small"]),
-                Paragraph(o["service"][:35], S["teal"]),
-            ])
-        ot = Table(opp_rows, colWidths=[16*mm, 28*mm, 40*mm, CW-120*mm, 36*mm])
-        ot.setStyle(TableStyle([
-            ("BACKGROUND",    (0,0),(-1,0),  NAVY),
-            ("TEXTCOLOR",     (0,0),(-1,0),  WHITE),
-            ("ROWBACKGROUNDS",(0,1),(-1,-1),  [WHITE, LGREY]),
-            ("LINEBELOW",     (0,0),(-1,-1),  0.3, MGREY),
-            ("TOPPADDING",    (0,0),(-1,-1),  5),
-            ("BOTTOMPADDING", (0,0),(-1,-1),  5),
-            ("LEFTPADDING",   (0,0),(-1,-1),  5),
-            ("VALIGN",        (0,0),(-1,-1),  "TOP"),
-        ]))
-        story.append(ot)
+            bg_col = colors.HexColor("#fff5f5") if o["priority"]=="High" else colors.HexColor("#fffbeb")
+
+            opp_t = Table([
+                [
+                    Paragraph(o["priority"], ParagraphStyle(
+                        "pr",fontName="Helvetica-Bold",fontSize=8,
+                        textColor=pc_col,leading=11)),
+                    [
+                        Paragraph(o["park"], S["bold9"]),
+                        Paragraph(o["gap"],  S["body"]),
+                        Paragraph(f"Why now: {o['reason']}", S["italic"]),
+                    ],
+                    Paragraph(o["service"], S["teal"]),
+                ]
+            ], colWidths=[14*mm, CW-80*mm, 66*mm])
+            opp_t.setStyle(TableStyle([
+                ("BACKGROUND",    (0,0),(-1,-1), bg_col),
+                ("LINEBEFORE",    (0,0),(0,-1),  3, pc_col),
+                ("BOX",           (0,0),(-1,-1), 0.5, MGREY),
+                ("VALIGN",        (0,0),(-1,-1), "TOP"),
+                ("TOPPADDING",    (0,0),(-1,-1), 8),
+                ("BOTTOMPADDING", (0,0),(-1,-1), 8),
+                ("LEFTPADDING",   (0,0),(-1,-1), 8),
+                ("RIGHTPADDING",  (0,0),(-1,-1), 8),
+            ]))
+            story.append(KeepTogether([opp_t, Spacer(1, 4*mm)]))
 
     story.append(PageBreak())
 
     # ── APPENDIX ───────────────────────────────────────────────────────────
-    story.append(_section_bar("APPENDIX — DATA SOURCES & METHODOLOGY", S))
+    story.append(_section_bar("APPENDIX — DATA SOURCES", S))
     story.append(Spacer(1, 4*mm))
 
     sources_list = [
         ("Ofcom Connected Nations",
          "Postcode-level fixed broadband and mobile coverage data. Updated quarterly."),
         ("EPC Register",
-         "Non-domestic Energy Performance Certificates. Source: MHCLG / Get Energy Performance Data API."),
+         "Non-domestic Energy Performance Certificates. Source: MHCLG."),
         ("Companies House",
          "Active company registrations by postcode. Source: Companies House API."),
         ("Environment Agency",
-         "Flood zone classification by postcode. Source: EA Postcodes Risk Assessment dataset."),
+         "Flood zone classification by postcode. Source: EA Postcodes Risk Assessment."),
         ("Police API",
          "Street-level crime data by location. Source: data.police.uk."),
         ("OS Names API",
          "Postcode to coordinate resolution. Source: OS Data Hub."),
         ("Shodan",
-         "Internet-exposed device and vulnerability intelligence by location. Source: Shodan.io."),
+         "Internet-exposed device and vulnerability intelligence. Source: Shodan.io."),
         ("WiredScore",
          "Building certification status. Manually verified via wiredscore.com/map."),
     ]
@@ -480,7 +571,7 @@ st.markdown("""
 
 st.markdown(
     "Combine data from the Science Parks app and Vulnerability Scanner "
-    "into a single master PDF report for sales and marketing use."
+    "into a single master PDF for sales and marketing use."
 )
 
 col1, col2 = st.columns([1, 2])
@@ -521,8 +612,9 @@ with col1:
             lbl, badge = source_label(u.get("source_app",""))
             parks_n = len(u.get("parks",[]))
             areas_n = len(u.get("areas",[]))
-            desc = f"{parks_n} parks" if parks_n else f"{areas_n} areas" if areas_n else "1 area"
-            c1, c2 = st.columns([4, 1])
+            desc = (f"{parks_n} parks" if parks_n else
+                    f"{areas_n} areas" if areas_n else "1 area")
+            c1, c2 = st.columns([4,1])
             with c1:
                 st.markdown(
                     f"<span class='source-badge {badge}'>{lbl}</span> "
@@ -539,7 +631,7 @@ with col1:
 
     st.divider()
     st.markdown("### Individual Building Postcodes")
-    st.caption("Optionally add postcodes for building-level entries in the report.")
+    st.caption("Optionally add postcodes for building-level entries.")
 
     pc_input = st.text_area(
         "Postcodes",
@@ -555,10 +647,12 @@ with col1:
         st.success(f"{len(pcs)} postcode(s) added.")
 
     if st.session_state.postcodes:
-        st.caption(f"{len(st.session_state.postcodes)} postcodes: " +
-                   ", ".join(st.session_state.postcodes[:8]) +
-                   (f" +{len(st.session_state.postcodes)-8} more"
-                    if len(st.session_state.postcodes) > 8 else ""))
+        st.caption(
+            f"{len(st.session_state.postcodes)} postcodes: " +
+            ", ".join(st.session_state.postcodes[:8]) +
+            (f" +{len(st.session_state.postcodes)-8} more"
+             if len(st.session_state.postcodes) > 8 else "")
+        )
         if st.button("Clear Postcodes", use_container_width=True):
             st.session_state.postcodes = []
             st.rerun()
@@ -576,21 +670,19 @@ with col2:
                 No data loaded yet</div>
             <div style="font-size:13px;line-height:1.8">
                 Upload JSON export files from the Science Parks app<br>
-                or Vulnerability Scanner using the panel on the left.<br>
-                Optionally add individual building postcodes.
+                or Vulnerability Scanner using the panel on the left.
             </div>
         </div>
         """, unsafe_allow_html=True)
     else:
         st.markdown("#### Contents of this report:")
-
         sections = ["Cover page with summary statistics", "Executive summary"]
 
         for u in st.session_state.uploads:
-            lbl    = source_label(u.get("source_app",""))[0]
-            label  = u.get("area_label","") or u.get("search_term","")
-            parks  = u.get("parks",[])
-            areas  = u.get("areas",[])
+            lbl   = source_label(u.get("source_app",""))[0]
+            label = u.get("area_label","") or u.get("search_term","")
+            parks = u.get("parks",[])
+            areas = u.get("areas",[])
 
             if parks:
                 sections.append(f"{lbl} — {label} ({len(parks)} parks)")
@@ -602,7 +694,8 @@ with col2:
                 for a in areas:
                     sections.append(
                         f"{lbl} — {a.get('area_label','') or a.get('search_term','')} "
-                        f"(Score: {a.get('score','')} · {a.get('critical_count',0)} critical)"
+                        f"(Score: {a.get('score','')} · "
+                        f"{a.get('critical_count',0)} critical)"
                     )
             else:
                 sections.append(f"{lbl} — {label}")
@@ -621,9 +714,11 @@ with col2:
         st.divider()
 
         postcodes_data = [
-            {"postcode": pc, "score": 0, "verdict": "Pending", "gaps": [], "company": ""}
+            {"postcode": pc, "score": 0, "verdict": "Pending",
+             "gaps": [], "company": ""}
             for pc in st.session_state.postcodes
         ]
+
         if st.button("⬇ Generate Master Report PDF", type="primary",
                      use_container_width=True):
             if not report_title:
