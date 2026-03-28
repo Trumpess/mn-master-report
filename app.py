@@ -197,6 +197,287 @@ def _build_opportunities(parks_uploads, intel_uploads):
     return opps
 
 
+
+def _get_ofcom_flat(park):
+    """Return flat ofcom dict regardless of nested or flat structure in export."""
+    ofcom = park.get("ofcom") or {}
+    if "connectivity" in ofcom:
+        conn = ofcom.get("connectivity") or {}
+        mob  = ofcom.get("mobile") or {}
+        return {
+            "gigabit_pct":        conn.get("gigabit_pct", 0) or 0,
+            "full_fibre_pct":     conn.get("full_fibre_pct", 0) or 0,
+            "superfast_pct":      conn.get("superfast_pct", 0) or 0,
+            "no_decent_pct":      conn.get("no_decent_pct", 0) or 0,
+            "indoor_4g_pct":      mob.get("indoor_4g_all_operators_pct", 0) or 0,
+            "outdoor_5g_pct":     mob.get("outdoor_5g_all_operators_pct", 0) or 0,
+        }
+    return {
+        "gigabit_pct":       float(ofcom.get("gigabit_pct", 0) or 0),
+        "full_fibre_pct":    float(ofcom.get("full_fibre_pct", 0) or 0),
+        "superfast_pct":     float(ofcom.get("superfast_pct", 0) or 0),
+        "no_decent_pct":     float(ofcom.get("no_decent_pct", 0) or 0),
+        "indoor_4g_pct":     float(ofcom.get("indoor_4g_pct", 0) or 0),
+        "outdoor_5g_pct":    float(ofcom.get("outdoor_5g_pct", 0) or 0),
+    }
+
+
+def _score_park(park):
+    """
+    Combined opportunity score (0-100). Higher = better sales prospect for MN.
+    Components:
+      - Connectivity gap (40pts): low gigabit/fibre = more opportunity
+      - EPC (20pts): poor rating = energy + connectivity conversation
+      - Flood risk (10pts): Zone 2/3 = resilience conversation
+      - Company density (20pts): more active companies = more potential customers
+      - Tenant scale (10pts): large tenant base = managed services opportunity
+    """
+    ofcom = _get_ofcom_flat(park)
+    gig   = ofcom.get("gigabit_pct", 0)
+    ff    = ofcom.get("full_fibre_pct", 0)
+
+    # Connectivity gap score — low coverage = high opportunity
+    conn_opp = 0
+    if gig < 20:   conn_opp = 40
+    elif gig < 50: conn_opp = 30
+    elif gig < 75: conn_opp = 20
+    else:          conn_opp = 10  # still WiredScore opportunity even if coverage good
+
+    # EPC score — poor rating = energy + connectivity conversation
+    epc     = park.get("epc") or {}
+    epc_mc  = (epc.get("most_common") or "").upper()
+    epc_opp = {"A":0,"B":2,"C":5,"D":12,"E":18,"F":20,"G":20}.get(epc_mc, 8)
+
+    # Flood risk — resilience conversation
+    flood     = park.get("flood_risk") or ""
+    flood_opp = {"Zone 3 (High)":10,"Zone 2 (Medium)":6,"Zone 1 (Low)":0}.get(flood, 3)
+
+    # Company density — from Companies House data
+    companies  = park.get("companies") or []
+    active_cos = sum(1 for c in companies if (c.get("company_status") or "").lower() == "active")
+    co_opp     = min(20, active_cos * 2)
+
+    # Tenant scale
+    tenants = str(park.get("tenants","") or "")
+    try:
+        t_num = int("".join(filter(str.isdigit, tenants.split("+")[0].split(",")[0])))
+    except Exception:
+        t_num = 0
+    tenant_opp = min(10, t_num // 10)
+
+    return min(100, conn_opp + epc_opp + flood_opp + co_opp + tenant_opp)
+
+
+def _connectivity_score(park):
+    """0-100 connectivity quality score (higher = better connectivity)."""
+    ofcom = _get_ofcom_flat(park)
+    gig   = ofcom.get("gigabit_pct", 0)
+    ff    = ofcom.get("full_fibre_pct", 0)
+    sup   = ofcom.get("superfast_pct", 0)
+    nd    = ofcom.get("no_decent_pct", 0)
+    score = min(40, ff*0.4) + min(20, gig*0.3) + min(20, sup*0.2) + max(0, 20 - nd*2)
+    return round(score)
+
+
+def _rag(score):
+    if score >= 70: return "Green"
+    if score >= 40: return "Amber"
+    return "Red"
+
+
+def _all_parks(parks_uploads):
+    """Flatten all parks from all uploads into a single list."""
+    parks = []
+    for upload in parks_uploads:
+        area = upload.get("area_label","")
+        for p in upload.get("parks",[]):
+            p2 = dict(p)
+            p2["_area"] = area
+            parks.append(p2)
+    return parks
+
+
+def _generate_gap_narrative(parks):
+    """
+    Returns a list of plain-English paragraph strings summarising
+    the key infrastructure gaps across the territory.
+    """
+    if not parks:
+        return ["No science park data available for gap analysis."]
+
+    total = len(parks)
+    ofcom_parks = [p for p in parks if _get_ofcom_flat(p).get("gigabit_pct") is not None]
+
+    paras = []
+
+    # Connectivity
+    low_gig  = [p for p in ofcom_parks if _get_ofcom_flat(p).get("gigabit_pct",0) < 50]
+    low_ff   = [p for p in ofcom_parks if _get_ofcom_flat(p).get("full_fibre_pct",0) < 60]
+    low_5g   = [p for p in ofcom_parks if _get_ofcom_flat(p).get("outdoor_5g_pct",0) < 40]
+
+    if low_gig:
+        pct = round(len(low_gig)/total*100)
+        names = ", ".join(p.get("name","") for p in low_gig[:3])
+        extra = f" including {names}{',' if len(low_gig)>3 else ''}"                 f"{' and '+str(len(low_gig)-3)+' others' if len(low_gig)>3 else ''}"
+        paras.append(
+            f"{len(low_gig)} of {total} parks ({pct}%) are in local authority areas "
+            f"where gigabit broadband coverage is below 50%{extra}. "
+            f"This represents a direct connectivity upgrade opportunity — "
+            f"campus-wide fibre and gigabit solutions are the primary conversation opener."
+        )
+
+    if low_ff and len(low_ff) != len(low_gig):
+        paras.append(
+            f"A further {len(low_ff)} parks sit in areas where full fibre availability "
+            f"is below 60%, indicating that on-campus fibre infrastructure may be limited "
+            f"or reliant on older copper-based broadband. "
+            f"A managed connectivity assessment is recommended at each site."
+        )
+
+    if low_5g:
+        paras.append(
+            f"{len(low_5g)} parks have outdoor 5G coverage below 40%, "
+            f"limiting smart campus, IoT, and mobile-first applications. "
+            f"Private 5G and indoor mobile enhancement are relevant service conversations "
+            f"at these locations."
+        )
+
+    # EPC
+    epc_parks   = [p for p in parks if p.get("epc")]
+    poor_epc    = [p for p in epc_parks if (p.get("epc") or {}).get("most_common","") in ("D","E","F","G")]
+    if poor_epc:
+        paras.append(
+            f"{len(poor_epc)} of {len(epc_parks)} parks with EPC data show a most common "
+            f"certificate rating of D or below. "
+            f"With the proposed 2027 commercial EPC minimum of C, "
+            f"these parks face significant upgrade pressure. "
+            f"Connectivity modernisation conversations can be paired with energy efficiency "
+            f"messaging — both point to the same infrastructure investment cycle."
+        )
+    elif epc_parks:
+        good_epc = [p for p in epc_parks if (p.get("epc") or {}).get("most_common","") in ("A","B","C")]
+        if good_epc:
+            paras.append(
+                f"{len(good_epc)} of {len(epc_parks)} parks show EPC ratings of C or above, "
+                f"indicating well-maintained building stock. "
+                f"WiredScore and SmartScore certification is the natural next conversation "
+                f"at these locations — the infrastructure investment is already present."
+            )
+
+    # Flood risk
+    flood_high = [p for p in parks if p.get("flood_risk","") == "Zone 3 (High)"]
+    flood_med  = [p for p in parks if p.get("flood_risk","") == "Zone 2 (Medium)"]
+    if flood_high:
+        names = ", ".join(p.get("name","") for p in flood_high[:2])
+        paras.append(
+            f"{len(flood_high)} park{'s are' if len(flood_high)>1 else ' is'} in EA Flood Zone 3 "
+            f"({names}{'...' if len(flood_high)>2 else ''}). "
+            f"Network resilience, dual-path routing, and business continuity planning "
+            f"are high-relevance service lines at these sites."
+        )
+    elif flood_med:
+        paras.append(
+            f"{len(flood_med)} park{'s sit' if len(flood_med)>1 else ' sits'} in EA Flood Zone 2. "
+            f"Infrastructure resilience is a relevant conversation, "
+            f"particularly for research-intensive tenants with continuity obligations."
+        )
+
+    # Company density
+    cos_parks = [p for p in parks if p.get("companies")]
+    if cos_parks:
+        total_active = sum(
+            sum(1 for c in (p.get("companies") or [])
+                if (c.get("company_status") or "").lower() == "active")
+            for p in cos_parks
+        )
+        paras.append(
+            f"Across {len(cos_parks)} parks with Companies House data, "
+            f"{total_active} active registered companies were identified at park postcodes. "
+            f"This represents the addressable tenant base for campus-wide managed connectivity, "
+            f"IT support, and M365 services."
+        )
+
+    if not paras:
+        paras.append(
+            "Connectivity and infrastructure data has been collected for the parks in this territory. "
+            "Run the Full Intelligence option in the Science Parks app to enrich the export "
+            "with EPC, Companies House, and flood risk data for deeper gap analysis."
+        )
+
+    return paras
+
+
+def _build_prospect_flags(parks):
+    """
+    Returns top prospect parks as list of dicts with name, score, and rationale string.
+    Sorted by opportunity score descending.
+    """
+    scored = []
+    for p in parks:
+        opp   = _score_park(p)
+        conn  = _connectivity_score(p)
+        ofcom = _get_ofcom_flat(p)
+        epc   = p.get("epc") or {}
+        flood = p.get("flood_risk","")
+        companies = p.get("companies") or []
+        active_cos = sum(1 for c in companies if (c.get("company_status") or "").lower() == "active")
+
+        reasons = []
+        gig = ofcom.get("gigabit_pct",0)
+        if gig < 30:
+            reasons.append(f"gigabit coverage only {gig:.0f}% — direct fibre opportunity")
+        elif gig < 60:
+            reasons.append(f"gigabit coverage {gig:.0f}% — upgrade conversation")
+
+        epc_mc = (epc.get("most_common") or "").upper()
+        if epc_mc in ("E","F","G"):
+            reasons.append(f"EPC {epc_mc} rating — below 2027 minimum, energy+connectivity messaging")
+        elif epc_mc == "D":
+            reasons.append(f"EPC D rating — approaching 2027 threshold, upgrade pressure building")
+
+        if flood == "Zone 3 (High)":
+            reasons.append("EA Flood Zone 3 — network resilience and continuity planning")
+        elif flood == "Zone 2 (Medium)":
+            reasons.append("EA Flood Zone 2 — resilience conversation relevant")
+
+        if active_cos >= 15:
+            reasons.append(f"{active_cos} active companies at postcode — managed services opportunity")
+        elif active_cos >= 5:
+            reasons.append(f"{active_cos} active companies — campus connectivity addressable market")
+
+        tenants = str(p.get("tenants","") or "")
+        try:
+            t_num = int("".join(filter(str.isdigit, tenants.split("+")[0].split(",")[0])))
+            if t_num >= 100:
+                reasons.append(f"{t_num}+ tenant organisations — campus-scale managed services")
+        except Exception:
+            pass
+
+        sector = (p.get("sector") or "").lower()
+        if any(x in sector for x in ["life science","biomedical","genomic","pharma"]):
+            reasons.append("life sciences sector — high bandwidth + compliance network requirements")
+        elif any(x in sector for x in ["ai","deep tech","gpu","hpc"]):
+            reasons.append("AI/deep tech sector — 10Gbps+ connectivity for GPU/HPC workloads")
+
+        if not reasons:
+            reasons.append("connectivity and certification assessment recommended")
+
+        scored.append({
+            "name":      p.get("name",""),
+            "postcode":  p.get("postcode",""),
+            "area":      p.get("_area",""),
+            "sector":    p.get("sector",""),
+            "opp_score": opp,
+            "conn_score":conn,
+            "epc":       epc_mc or "—",
+            "flood":     flood or "—",
+            "rationale": "  ·  ".join(reasons[:3]),
+        })
+
+    scored.sort(key=lambda x: -x["opp_score"])
+    return scored
+
+
 def generate_master_pdf(parks_uploads, intel_uploads, report_title, prepared_by):
     buf = io.BytesIO()
     S   = _styles()
@@ -213,6 +494,11 @@ def generate_master_pdf(parks_uploads, intel_uploads, report_title, prepared_by)
     total_briefings= sum(len(u.get("briefings",[])) for u in intel_uploads)
     opportunities  = _build_opportunities(parks_uploads, intel_uploads)
     high_opps      = sum(1 for o in opportunities if o["priority"]=="High")
+    all_parks      = _all_parks(parks_uploads)
+    prospect_flags = _build_prospect_flags(all_parks)
+    gap_narrative  = _generate_gap_narrative(all_parks)
+    enriched       = any(p.get("epc") or p.get("companies") or p.get("flood_risk")
+                         for p in all_parks)
 
     # ── COVER ──────────────────────────────────────────────────────────────
     t = Table([[Paragraph(
@@ -277,16 +563,58 @@ def generate_master_pdf(parks_uploads, intel_uploads, report_title, prepared_by)
     ))
     area_str = ", ".join(park_areas) if park_areas else "the assessed territory"
 
-    exec_text = (
-        f"This report covers digital infrastructure intelligence for {area_str}. "
-        f"It includes data for {total_parks} science and innovation park{'s' if total_parks!=1 else ''}"
-        f"{' and '+str(total_briefings)+' individual building assessment'+('s' if total_briefings!=1 else '') if total_briefings else ''}. "
-        f"The analysis has identified {len(opportunities)} service opportunities for Modern Networks, "
-        f"of which {high_opps} are high priority requiring prompt action. "
-        "Opportunities span connectivity upgrades, WiredScore and SmartScore certification, "
-        "managed IT services, and cybersecurity — all core Modern Networks service lines."
+    # Build a data-driven executive summary
+    exec_lines = []
+    exec_lines.append(
+        f"This report covers digital infrastructure intelligence for {area_str}, "
+        f"profiling {total_parks} science and innovation park{'s' if total_parks!=1 else ''}"
+        f"{' alongside '+str(total_briefings)+' individual building assessment'+('s' if total_briefings!=1 else '') if total_briefings else ''}."
     )
-    story.append(Paragraph(exec_text, S["body"]))
+
+    if all_parks and enriched:
+        ofcom_with_data = [p for p in all_parks if _get_ofcom_flat(p).get("gigabit_pct") is not None]
+        if ofcom_with_data:
+            avg_gig = round(sum(_get_ofcom_flat(p).get("gigabit_pct",0) for p in ofcom_with_data) / len(ofcom_with_data))
+            low_gig = sum(1 for p in ofcom_with_data if _get_ofcom_flat(p).get("gigabit_pct",0) < 50)
+            exec_lines.append(
+                f"Connectivity analysis shows an average gigabit coverage of {avg_gig}% across the territory. "
+                f"{low_gig} of {len(ofcom_with_data)} parks are in areas below 50% gigabit availability — "
+                f"the threshold below which campus-wide connectivity upgrades are a primary sales conversation."
+            )
+        epc_parks = [p for p in all_parks if p.get("epc")]
+        if epc_parks:
+            poor_epc = sum(1 for p in epc_parks
+                           if (p.get("epc") or {}).get("most_common","") in ("D","E","F","G"))
+            exec_lines.append(
+                f"Energy performance data is available for {len(epc_parks)} parks. "
+                f"{poor_epc} show a most common EPC rating of D or below, "
+                f"creating a combined connectivity and energy upgrade conversation "
+                f"ahead of the proposed 2027 commercial EPC minimum."
+            )
+        flood_parks = [p for p in all_parks if p.get("flood_risk","") in ("Zone 3 (High)","Zone 2 (Medium)")]
+        if flood_parks:
+            exec_lines.append(
+                f"{len(flood_parks)} park{'s sit' if len(flood_parks)>1 else ' sits'} in EA Flood Zone 2 or 3, "
+                f"making network resilience and business continuity a relevant service conversation."
+            )
+
+    if prospect_flags:
+        top3 = ", ".join(p["name"] for p in prospect_flags[:3])
+        exec_lines.append(
+            f"Opportunity scoring across all data points identifies {top3} as the highest-priority "
+            f"prospects in this territory. Full prospect rankings are included in the Territory Rankings section."
+        )
+
+    exec_lines.append(
+        f"The analysis has identified {len(opportunities)} service opportunities for Modern Networks, "
+        f"of which {high_opps} are high priority. "
+        "Opportunities span connectivity upgrades, WiredScore and SmartScore certification, "
+        "managed IT services, and network resilience — all core Modern Networks service lines."
+    )
+
+    for line in exec_lines:
+        story.append(Paragraph(line, S["body"]))
+        story.append(Spacer(1, 3*mm))
     story.append(PageBreak())
 
     # ── SCIENCE PARKS ──────────────────────────────────────────────────────
@@ -304,25 +632,61 @@ def generate_master_pdf(parks_uploads, intel_uploads, report_title, prepared_by)
             ))
             story.append(Spacer(1, 4*mm))
 
-            # Summary table
-            hdr = [
-                Paragraph("PARK",        S["monow"]),
-                Paragraph("POSTCODE",    S["monow"]),
-                Paragraph("SECTOR",      S["monow"]),
-                Paragraph("TENANTS",     S["monow"]),
-                Paragraph("OPERATOR",    S["monow"]),
-            ]
-            rows = [hdr]
-            for p in parks:
-                rows.append([
-                    Paragraph(p.get("name","")[:35],    S["bold9"]),
-                    Paragraph(p.get("postcode",""),      S["body"]),
-                    Paragraph(p.get("sector","")[:28],   S["small"]),
-                    Paragraph(str(p.get("tenants","")),  S["body"]),
-                    Paragraph(p.get("operator","")[:28], S["small"]),
-                ])
-            cws = [55*mm, 22*mm, 43*mm, 18*mm, CW-138*mm]
-            pt = Table(rows, colWidths=cws)
+            park_enriched = any(p.get("epc") or p.get("companies") or p.get("flood_risk")
+                                for p in parks)
+
+            # Summary table — extended if enriched data present
+            if park_enriched:
+                hdr = [
+                    Paragraph("PARK",       S["monow"]),
+                    Paragraph("POSTCODE",   S["monow"]),
+                    Paragraph("CONN",       S["monow"]),
+                    Paragraph("EPC",        S["monow"]),
+                    Paragraph("FLOOD",      S["monow"]),
+                    Paragraph("COS",        S["monow"]),
+                    Paragraph("TENANTS",    S["monow"]),
+                ]
+                rows = [hdr]
+                for p in sorted(parks, key=lambda x: -_score_park(x)):
+                    cs   = _connectivity_score(p)
+                    rag  = _rag(cs)
+                    rag_char = {"Green":"●","Amber":"◑","Red":"○"}.get(rag,"")
+                    epc  = (p.get("epc") or {}).get("most_common","—") or "—"
+                    fl   = p.get("flood_risk","—") or "—"
+                    fl_s = {"Zone 3 (High)":"Z3 ⚠","Zone 2 (Medium)":"Z2","Zone 1 (Low)":"Z1"}.get(fl,"—")
+                    cos  = sum(1 for c in (p.get("companies") or [])
+                               if (c.get("company_status") or "").lower()=="active")
+                    rows.append([
+                        Paragraph(p.get("name","")[:30],  S["bold9"]),
+                        Paragraph(p.get("postcode",""),    S["body"]),
+                        Paragraph(f"{rag_char} {cs}/100",  S["body"]),
+                        Paragraph(epc,                     S["body"]),
+                        Paragraph(fl_s,                    S["body"]),
+                        Paragraph(str(cos) if cos else "—",S["body"]),
+                        Paragraph(str(p.get("tenants","")),S["body"]),
+                    ])
+                cws = [48*mm, 20*mm, 20*mm, 12*mm, 18*mm, 12*mm, CW-130*mm]
+                pt  = Table(rows, colWidths=cws)
+            else:
+                hdr = [
+                    Paragraph("PARK",     S["monow"]),
+                    Paragraph("POSTCODE", S["monow"]),
+                    Paragraph("SECTOR",   S["monow"]),
+                    Paragraph("TENANTS",  S["monow"]),
+                    Paragraph("OPERATOR", S["monow"]),
+                ]
+                rows = [hdr]
+                for p in parks:
+                    rows.append([
+                        Paragraph(p.get("name","")[:35],    S["bold9"]),
+                        Paragraph(p.get("postcode",""),      S["body"]),
+                        Paragraph(p.get("sector","")[:28],   S["small"]),
+                        Paragraph(str(p.get("tenants","")),  S["body"]),
+                        Paragraph(p.get("operator","")[:28], S["small"]),
+                    ])
+                cws = [55*mm, 22*mm, 43*mm, 18*mm, CW-138*mm]
+                pt  = Table(rows, colWidths=cws)
+
             pt.setStyle(TableStyle([
                 ("BACKGROUND",    (0,0),(-1,0),  NAVY),
                 ("ROWBACKGROUNDS",(0,1),(-1,-1),  [WHITE, LGREY]),
@@ -333,6 +697,13 @@ def generate_master_pdf(parks_uploads, intel_uploads, report_title, prepared_by)
                 ("VALIGN",        (0,0),(-1,-1),  "TOP"),
             ]))
             story.append(pt)
+            if park_enriched:
+                story.append(Paragraph(
+                    "CONN = connectivity score (Ofcom LA-level)  ·  EPC = most common non-domestic rating  "
+                    "·  FLOOD = EA zone  ·  COS = active Companies House registrations at postcode  "
+                    "·  Parks sorted by opportunity score (highest first)",
+                    S["small"]
+                ))
             story.append(Spacer(1, 6*mm))
 
             # Park notes
@@ -476,7 +847,132 @@ def generate_master_pdf(parks_uploads, intel_uploads, report_title, prepared_by)
 
         story.append(PageBreak())
 
-    # ── PRIORITY ACTION LIST ────────────────────────────────────────────────
+    # ── TERRITORY RANKINGS ─────────────────────────────────────────────────
+    if all_parks and enriched:
+        story.append(_bar("TERRITORY RANKINGS — OPPORTUNITY SCORE", S))
+        story.append(Spacer(1, 3*mm))
+        story.append(Paragraph(
+            "Parks ranked by combined opportunity score. Score combines connectivity gap, "
+            "EPC rating, flood risk, Companies House density, and tenant scale. "
+            "Higher score = stronger case for Modern Networks engagement.",
+            S["italic"]
+        ))
+        story.append(Spacer(1, 4*mm))
+
+        rank_hdr = [
+            Paragraph("RANK",      S["monow"]),
+            Paragraph("PARK",      S["monow"]),
+            Paragraph("AREA",      S["monow"]),
+            Paragraph("OPP SCORE", S["monow"]),
+            Paragraph("CONN",      S["monow"]),
+            Paragraph("EPC",       S["monow"]),
+            Paragraph("FLOOD",     S["monow"]),
+            Paragraph("SECTOR",    S["monow"]),
+        ]
+        rank_rows = [rank_hdr]
+        for i, p in enumerate(prospect_flags[:20], 1):
+            flood_s = {"Zone 3 (High)":"Z3 ⚠","Zone 2 (Medium)":"Z2","Zone 1 (Low)":"Z1"}.get(
+                p["flood"],"—")
+            opp_col = RED if p["opp_score"] >= 60 else AMBER if p["opp_score"] >= 35 else GREEN
+            rank_rows.append([
+                Paragraph(str(i),                  S["body"]),
+                Paragraph(p["name"][:28],           S["bold9"]),
+                Paragraph((p["area"] or "")[:20],   S["small"]),
+                Paragraph(
+                    str(p["opp_score"]),
+                    ParagraphStyle("ors",fontName="Helvetica-Bold",fontSize=9,
+                                   textColor=opp_col,leading=12)
+                ),
+                Paragraph(f"{p['conn_score']}/100",  S["body"]),
+                Paragraph(p["epc"],                  S["body"]),
+                Paragraph(flood_s,                   S["body"]),
+                Paragraph((p["sector"] or "")[:22],  S["small"]),
+            ])
+
+        rank_t = Table(rank_rows,
+                       colWidths=[12*mm, 45*mm, 32*mm, 18*mm, 18*mm, 12*mm, 16*mm, CW-153*mm])
+        rank_t.setStyle(TableStyle([
+            ("BACKGROUND",    (0,0),(-1,0),  NAVY),
+            ("ROWBACKGROUNDS",(0,1),(-1,-1),  [WHITE, LGREY]),
+            ("LINEBELOW",     (0,0),(-1,-1),  0.3, MGREY),
+            ("TOPPADDING",    (0,0),(-1,-1),  5),
+            ("BOTTOMPADDING", (0,0),(-1,-1),  5),
+            ("LEFTPADDING",   (0,0),(-1,-1),  5),
+            ("VALIGN",        (0,0),(-1,-1),  "TOP"),
+        ]))
+        story.append(rank_t)
+        story.append(Paragraph(
+            "OPP SCORE = composite opportunity score (0-100)  ·  "
+            "CONN = connectivity quality score  ·  higher OPP SCORE = stronger MN opportunity",
+            S["small"]
+        ))
+        story.append(PageBreak())
+
+    # ── GAP ANALYSIS NARRATIVE ──────────────────────────────────────────────
+    if all_parks:
+        story.append(_bar("TERRITORY GAP ANALYSIS", S))
+        story.append(Spacer(1, 4*mm))
+        for para in gap_narrative:
+            story.append(Paragraph(para, S["body"]))
+            story.append(Spacer(1, 4*mm))
+        story.append(PageBreak())
+
+    # ── PROSPECT FLAGS ──────────────────────────────────────────────────────
+    if prospect_flags:
+        story.append(_bar("PRIORITY PROSPECTS", S))
+        story.append(Spacer(1, 3*mm))
+        story.append(Paragraph(
+            "Top prospects identified by opportunity scoring. "
+            "Each entry includes the rationale for prioritisation "
+            "to support sales conversation preparation.",
+            S["italic"]
+        ))
+        story.append(Spacer(1, 4*mm))
+
+        for p in prospect_flags[:10]:
+            opp_col = RED if p["opp_score"] >= 60 else AMBER if p["opp_score"] >= 35 else GREEN
+            bg_col  = LRED if p["opp_score"] >= 60 else LCREAM if p["opp_score"] >= 35 else LGREEN
+            flood_s = {"Zone 3 (High)":"Zone 3 — High","Zone 2 (Medium)":"Zone 2 — Medium",
+                       "Zone 1 (Low)":"Zone 1 — Low"}.get(p["flood"], p["flood"])
+            flag_t = Table(
+                [[
+                    Paragraph(
+                        str(p["opp_score"]),
+                        ParagraphStyle("ops",fontName="Helvetica-Bold",fontSize=14,
+                                       textColor=opp_col,leading=18)
+                    ),
+                    [
+                        Paragraph(
+                            f'{p["name"]}  ·  {p["postcode"]}'
+                            f'{"  ·  "+p["area"] if p["area"] else ""}',
+                            S["bold9"]
+                        ),
+                        Paragraph(p["rationale"], S["body"]),
+                        Paragraph(
+                            f'Sector: {p["sector"] or "—"}  ·  '
+                            f'Connectivity: {p["conn_score"]}/100  ·  '
+                            f'EPC: {p["epc"]}  ·  Flood: {flood_s}',
+                            S["small"]
+                        ),
+                    ],
+                ]],
+                colWidths=[18*mm, CW-18*mm]
+            )
+            flag_t.setStyle(TableStyle([
+                ("BACKGROUND",    (0,0),(-1,-1), bg_col),
+                ("LINEBEFORE",    (0,0),(0,-1),  3, opp_col),
+                ("BOX",           (0,0),(-1,-1), 0.5, MGREY),
+                ("VALIGN",        (0,0),(-1,-1), "TOP"),
+                ("TOPPADDING",    (0,0),(-1,-1), 8),
+                ("BOTTOMPADDING", (0,0),(-1,-1), 8),
+                ("LEFTPADDING",   (0,0),(-1,-1), 8),
+                ("RIGHTPADDING",  (0,0),(-1,-1), 8),
+            ]))
+            story.append(KeepTogether([flag_t, Spacer(1, 4*mm)]))
+
+        story.append(PageBreak())
+
+    # ── PRIORITY ACTION LIST ─────────────────────────────────────────────────
     story.append(_bar("PRIORITY ACTION LIST", S))
     story.append(Spacer(1, 3*mm))
     story.append(Paragraph(
@@ -687,6 +1183,11 @@ with col2:
         st.markdown("#### This report will contain:")
 
         sections = ["Cover page with territory summary statistics", "Executive summary"]
+        if any(p.get("epc") or p.get("companies") or p.get("flood_risk")
+               for u in st.session_state.parks_uploads for p in u.get("parks",[])):
+            sections += ["Territory rankings — opportunity score across all parks",
+                         "Gap analysis narrative",
+                         "Priority prospects — top targets with rationale"]
 
         for u in st.session_state.parks_uploads:
             label = u.get("area_label","")
