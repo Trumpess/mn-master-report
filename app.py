@@ -38,6 +38,7 @@ body,.stApp{background:#f4f6f9;color:#0f172a}
               font-size:11px;font-weight:600;margin-right:6px}
 .badge-parks{background:#e0f2fe;color:#0369a1}
 .badge-intel{background:#f0fdf4;color:#166534}
+.badge-retail{background:#fef3c7;color:#92400e}
 </style>
 """, unsafe_allow_html=True)
 
@@ -624,10 +625,12 @@ def generate_master_pdf(parks_uploads, intel_uploads, report_title, prepared_by)
             parks      = upload.get("parks", [])
             exported   = upload.get("exported_at","")
 
-            story.append(_bar(f"SCIENCE PARKS — {area_label.upper()}", S))
+            src_label = "RETAIL ASSETS" if upload.get("source_app") == "retail_intelligence" else "SCIENCE PARKS"
+            noun      = "assets" if upload.get("source_app") == "retail_intelligence" else "parks"
+            story.append(_bar(f"{src_label} — {area_label.upper()}", S))
             story.append(Spacer(1, 3*mm))
             story.append(Paragraph(
-                f"{len(parks)} parks  ·  Exported: {exported}",
+                f"{len(parks)} {noun}  ·  Exported: {exported}",
                 S["mono"]
             ))
             story.append(Spacer(1, 4*mm))
@@ -636,15 +639,16 @@ def generate_master_pdf(parks_uploads, intel_uploads, report_title, prepared_by)
                                 for p in parks)
 
             # Summary table — extended if enriched data present
+            is_retail = upload.get("source_app") == "retail_intelligence"
             if park_enriched:
                 hdr = [
-                    Paragraph("PARK",       S["monow"]),
+                    Paragraph("ASSET" if is_retail else "PARK",  S["monow"]),
                     Paragraph("POSTCODE",   S["monow"]),
                     Paragraph("CONN",       S["monow"]),
                     Paragraph("EPC",        S["monow"]),
                     Paragraph("FLOOD",      S["monow"]),
                     Paragraph("COS",        S["monow"]),
-                    Paragraph("TENANTS",    S["monow"]),
+                    Paragraph("GLA" if is_retail else "TENANTS", S["monow"]),
                 ]
                 rows = [hdr]
                 for p in sorted(parks, key=lambda x: -_score_park(x)):
@@ -656,6 +660,7 @@ def generate_master_pdf(parks_uploads, intel_uploads, report_title, prepared_by)
                     fl_s = {"Zone 3 (High)":"Z3 ⚠","Zone 2 (Medium)":"Z2","Zone 1 (Low)":"Z1"}.get(fl,"—")
                     cos  = sum(1 for c in (p.get("companies") or [])
                                if (c.get("company_status") or "").lower()=="active")
+                    scale = f"{p.get('gla_sqft',0):,} sf" if is_retail else str(p.get("tenants",""))
                     rows.append([
                         Paragraph(p.get("name","")[:30],  S["bold9"]),
                         Paragraph(p.get("postcode",""),    S["body"]),
@@ -663,28 +668,47 @@ def generate_master_pdf(parks_uploads, intel_uploads, report_title, prepared_by)
                         Paragraph(epc,                     S["body"]),
                         Paragraph(fl_s,                    S["body"]),
                         Paragraph(str(cos) if cos else "—",S["body"]),
-                        Paragraph(str(p.get("tenants","")),S["body"]),
+                        Paragraph(scale,                   S["body"]),
                     ])
                 cws = [48*mm, 20*mm, 20*mm, 12*mm, 18*mm, 12*mm, CW-130*mm]
                 pt  = Table(rows, colWidths=cws)
             else:
-                hdr = [
-                    Paragraph("PARK",     S["monow"]),
-                    Paragraph("POSTCODE", S["monow"]),
-                    Paragraph("SECTOR",   S["monow"]),
-                    Paragraph("TENANTS",  S["monow"]),
-                    Paragraph("OPERATOR", S["monow"]),
-                ]
-                rows = [hdr]
-                for p in parks:
-                    rows.append([
-                        Paragraph(p.get("name","")[:35],    S["bold9"]),
-                        Paragraph(p.get("postcode",""),      S["body"]),
-                        Paragraph(p.get("sector","")[:28],   S["small"]),
-                        Paragraph(str(p.get("tenants","")),  S["body"]),
-                        Paragraph(p.get("operator","")[:28], S["small"]),
-                    ])
-                cws = [55*mm, 22*mm, 43*mm, 18*mm, CW-138*mm]
+                if is_retail:
+                    hdr = [
+                        Paragraph("ASSET",    S["monow"]),
+                        Paragraph("POSTCODE", S["monow"]),
+                        Paragraph("TYPE",     S["monow"]),
+                        Paragraph("GLA",      S["monow"]),
+                        Paragraph("LANDLORD", S["monow"]),
+                    ]
+                    rows = [hdr]
+                    for p in parks:
+                        rows.append([
+                            Paragraph(p.get("name","")[:35],       S["bold9"]),
+                            Paragraph(p.get("postcode",""),         S["body"]),
+                            Paragraph(p.get("type","")[:28],        S["small"]),
+                            Paragraph(f"{p.get('gla_sqft',0):,}",   S["body"]),
+                            Paragraph(p.get("landlord","")[:28],    S["small"]),
+                        ])
+                    cws = [55*mm, 22*mm, 40*mm, 20*mm, CW-137*mm]
+                else:
+                    hdr = [
+                        Paragraph("PARK",     S["monow"]),
+                        Paragraph("POSTCODE", S["monow"]),
+                        Paragraph("SECTOR",   S["monow"]),
+                        Paragraph("TENANTS",  S["monow"]),
+                        Paragraph("OPERATOR", S["monow"]),
+                    ]
+                    rows = [hdr]
+                    for p in parks:
+                        rows.append([
+                            Paragraph(p.get("name","")[:35],    S["bold9"]),
+                            Paragraph(p.get("postcode",""),      S["body"]),
+                            Paragraph(p.get("sector","")[:28],   S["small"]),
+                            Paragraph(str(p.get("tenants","")),  S["body"]),
+                            Paragraph(p.get("operator","")[:28], S["small"]),
+                        ])
+                    cws = [55*mm, 22*mm, 43*mm, 18*mm, CW-138*mm]
                 pt  = Table(rows, colWidths=cws)
 
             pt.setStyle(TableStyle([
@@ -1080,8 +1104,8 @@ with col1:
     st.divider()
 
     # Science Parks uploads
-    st.markdown("### 🔬 Science Parks Data")
-    st.caption("Upload JSON export from the Science Parks Intelligence app.")
+    st.markdown("### 🔬 Science Parks & Retail Data")
+    st.caption("Upload JSON export from the Science Parks Intelligence app or the Retail Property Intelligence app.")
     parks_files = st.file_uploader(
         "Science Parks JSON",
         type=["json"],
@@ -1092,7 +1116,11 @@ with col1:
     if parks_files:
         for f in parks_files:
             data = parse_upload(f)
-            if data and data.get("source_app") == "science_parks":
+            if data and data.get("source_app") in ("science_parks", "retail_intelligence"):
+                # Normalise retail exports: rename "assets" key to "parks" so
+                # all downstream PDF and analysis code works unchanged
+                if "assets" in data and "parks" not in data:
+                    data["parks"] = data.pop("assets")
                 already = any(
                     u.get("exported_at") == data.get("exported_at") and
                     u.get("area_label")  == data.get("area_label")
@@ -1102,15 +1130,20 @@ with col1:
                     st.session_state.parks_uploads.append(data)
                     st.success(f"Loaded: {f.name}")
             elif data:
-                st.warning(f"{f.name} is not a Science Parks export.")
+                st.warning(f"{f.name} is not a Science Parks or Retail Intelligence export.")
 
     if st.session_state.parks_uploads:
         for i, u in enumerate(st.session_state.parks_uploads):
             c1, c2 = st.columns([4,1])
             with c1:
+                src   = u.get("source_app","")
+                badge = "badge-retail" if src == "retail_intelligence" else "badge-parks"
+                label = "Retail" if src == "retail_intelligence" else "Science Parks"
+                n_assets = len(u.get("parks",[]))
+                noun  = "assets" if src == "retail_intelligence" else "parks"
                 st.markdown(
-                    f"<span class='source-badge badge-parks'>Science Parks</span> "
-                    f"{u.get('area_label','')} — {len(u.get('parks',[]))} parks",
+                    f"<span class='source-badge {badge}'>{label}</span> "
+                    f"{u.get('area_label','')} — {n_assets} {noun}",
                     unsafe_allow_html=True
                 )
             with c2:
@@ -1190,13 +1223,16 @@ with col2:
                          "Priority prospects — top targets with rationale"]
 
         for u in st.session_state.parks_uploads:
-            label = u.get("area_label","")
-            parks = u.get("parks",[])
-            sections.append(f"Science Parks — {label} ({len(parks)} parks)")
+            label  = u.get("area_label","")
+            parks  = u.get("parks",[])
+            src    = u.get("source_app","")
+            noun   = "assets" if src == "retail_intelligence" else "parks"
+            hdr    = "Retail" if src == "retail_intelligence" else "Science Parks"
+            sections.append(f"{hdr} — {label} ({len(parks)} {noun})")
             for p in parks[:5]:
                 st.caption(f"  · {p.get('name','')} ({p.get('postcode','')})")
             if len(parks) > 5:
-                st.caption(f"  · +{len(parks)-5} more parks")
+                st.caption(f"  · +{len(parks)-5} more {noun}")
 
         for u in st.session_state.intel_uploads:
             n = len(u.get("briefings",[]))
