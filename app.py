@@ -32,115 +32,183 @@ def _ai_narrative(prompt, fallback):
 
 def _build_ai_exec_prompt(items, mode, area_str, opportunities, enriched):
     """Build the prompt for the AI executive summary."""
+    AUDIENCE = {
+        "retail": {
+            "audience":       "shopping centre and retail park management teams, managing agents, and landlords",
+            "decision_makers":"centre directors, estate managers, managing agents (CBRE, JLL, Savills, Cushman & Wakefield), and asset managers",
+            "context":        "Modern Networks provides managed IT and connectivity infrastructure to major UK retail and leisure destinations including Manchester Arndale, Centre MK, and Watford. Modern Networks holds WiredScore and SmartScore Accredited Professional status.",
+            "services":       "managed connectivity, full fibre, guest WiFi, Network-as-a-Service, EPOS connectivity, WiredScore/SmartScore AP services, managed IT, and network resilience",
+            "hooks":          "anchor tenant digital requirements, footfall and dwell time analytics, F&B and leisure connectivity, click-and-collect infrastructure, the 2027 EPC commercial minimum, repositioning projects requiring new infrastructure from scratch, and WiredScore/SmartScore certification as a differentiator for tenant attraction",
+        },
+        "parks": {
+            "audience":       "science and innovation park directors, estates managers, and park operators",
+            "decision_makers":"park directors, estates and facilities managers, and parent university or institutional landlords",
+            "context":        "Modern Networks provides managed IT and connectivity infrastructure to UK science and innovation parks. Modern Networks holds WiredScore and SmartScore Accredited Professional status.",
+            "services":       "research-grade managed connectivity, full fibre, gigabit infrastructure, Network-as-a-Service, private 5G, WiredScore/SmartScore AP services, managed IT, and network resilience",
+            "hooks":          "research-grade bandwidth requirements, tenant density and company growth, sector-specific needs (life sciences, AI, deep tech, genomics), the PSTN copper switch-off affecting legacy connections, 2027 EPC commercial minimum, IoT and smart campus applications, and WiredScore certification as a premium tenant differentiator",
+        },
+        "intel": {
+            "audience":       "building owners, managing agents, and building managers of commercial office properties",
+            "decision_makers":"building managers, managing agents (CBRE, JLL, Savills, Cushman & Wakefield), and asset managers",
+            "context":        "Modern Networks provides managed IT and connectivity infrastructure to UK commercial office buildings. Modern Networks holds WiredScore and SmartScore Accredited Professional status.",
+            "services":       "managed connectivity, full fibre, Network-as-a-Service, WiredScore/SmartScore AP services, managed IT, cybersecurity, and network resilience",
+            "hooks":          "tenant attraction and retention in a flight-to-quality market, WiredScore and SmartScore certification as a competitive differentiator, EPC pressure ahead of the 2027 minimum, flood risk and network resilience, and post-pandemic office repurposing requiring new infrastructure",
+        },
+    }
+    a    = AUDIENCE.get(mode, AUDIENCE["parks"])
     noun = "retail assets" if mode=="retail" else "science and innovation parks"
-    high_opps = sum(1 for o in opportunities if o["priority"]=="High")
-
-    # Summarise key data points
+    high_opps   = sum(1 for o in opportunities if o["priority"]=="High")
+    flags       = _prospect_flags(items, mode) if items else []
     ofcom_items = [p for p in items if _get_ofcom_flat(p).get("gigabit_pct") is not None]
-    avg_gig = round(sum(_get_ofcom_flat(p)["gigabit_pct"] for p in ofcom_items)/len(ofcom_items)) if ofcom_items else None
-    low_gig = sum(1 for p in ofcom_items if _get_ofcom_flat(p)["gigabit_pct"] < 50) if ofcom_items else 0
-    epc_items = [p for p in items if p.get("epc")]
-    poor_epc  = sum(1 for p in epc_items if (p.get("epc") or {}).get("most_common","") in ("D","E","F","G"))
-    flood_high= sum(1 for p in items if p.get("flood_risk","")=="Zone 3 (High)")
-    flood_med = sum(1 for p in items if p.get("flood_risk","")=="Zone 2 (Medium)")
-    flags     = _prospect_flags(items, mode)
-    top3      = ", ".join(p["name"] for p in flags[:3]) if flags else ""
+    avg_gig  = round(sum(_get_ofcom_flat(p)["gigabit_pct"] for p in ofcom_items)/len(ofcom_items)) if ofcom_items else None
+    low_gig  = sum(1 for p in ofcom_items if _get_ofcom_flat(p)["gigabit_pct"] < 50) if ofcom_items else 0
+    low_ff   = sum(1 for p in ofcom_items if _get_ofcom_flat(p)["full_fibre_pct"] < 60) if ofcom_items else 0
+    epc_items= [p for p in items if p.get("epc")]
+    poor_epc = sum(1 for p in epc_items if (p.get("epc") or {}).get("most_common","") in ("D","E","F","G"))
+    good_epc = sum(1 for p in epc_items if (p.get("epc") or {}).get("most_common","") in ("A","B","C"))
+    flood_risk=sum(1 for p in items if p.get("flood_risk","") in ("Zone 3 (High)","Zone 2 (Medium)"))
+    top_prospects = "\n".join(
+        f"- {p['name']} ({p['postcode']}): opportunity score {p['opp_score']}/100 — {p['rationale']}"
+        for p in flags[:5]
+    ) if flags else "No prospect scoring data available"
+    asset_detail = []
+    for p in items[:15]:
+        o   = _get_ofcom_flat(p)
+        epc = (p.get("epc") or {}).get("most_common","unknown")
+        fl  = p.get("flood_risk","unknown")
+        cos = sum(1 for c in (p.get("companies") or []) if (c.get("company_status") or "").lower()=="active")
+        if mode == "retail":
+            detail = (f"{p.get('name','')} ({p.get('type','')}, {p.get('gla_sqft',0):,} sq ft, "
+                      f"landlord: {p.get('landlord','')}): gigabit {o['gigabit_pct']:.0f}%, "
+                      f"full fibre {o['full_fibre_pct']:.0f}%, EPC {epc}, flood {fl}, "
+                      f"{cos} active companies"
+                      + (", repositioning underway" if p.get("repositioning") else ""))
+        else:
+            detail = (f"{p.get('name','')} ({p.get('sector','')}, {p.get('tenants','')} tenants): "
+                      f"gigabit {o['gigabit_pct']:.0f}%, full fibre {o['full_fibre_pct']:.0f}%, "
+                      f"EPC {epc}, flood {fl}, {cos} active companies")
+        asset_detail.append(detail)
 
-    data_summary = f"""
-Territory: {area_str}
-Asset class: {noun}
-Total {noun}: {len(items)}
-Average gigabit coverage: {avg_gig}% (across {len(ofcom_items)} with Ofcom data)
-Assets below 50% gigabit: {low_gig}
-Assets with EPC data: {len(epc_items)} ({poor_epc} rated D or below)
-Assets in flood zone 2 or 3: {flood_high + flood_med}
-Total opportunities identified: {len(opportunities)} ({high_opps} high priority)
-Top prospects by opportunity score: {top3}
-"""
+    return f"""You are a senior sales analyst at Modern Networks, a UK managed IT and connectivity provider. You are writing an executive summary for an internal sales intelligence report.
 
-    if mode == "retail":
-        context = "Modern Networks provides managed IT and connectivity infrastructure to major UK retail and leisure destinations including Manchester Arndale, Centre MK, and Watford. Modern Networks holds WiredScore and SmartScore Accredited Professional status."
-        tone    = "retail property — speak to landlords, asset managers, and property directors. Reference anchor tenant requirements, footfall, F&B and leisure operators, click-and-collect, and the 2027 EPC minimum where relevant."
-    else:
-        context = "Modern Networks provides managed IT and connectivity infrastructure to UK science and innovation parks. Modern Networks holds WiredScore and SmartScore Accredited Professional status."
-        tone    = "science and innovation parks — speak to park directors and estates managers. Reference research-grade connectivity, tenant density, sector requirements (life sciences, deep tech, AI), and the 2027 EPC minimum where relevant."
+ABOUT MODERN NETWORKS:
+{a['context']}
+Services offered: {a['services']}
 
-    return f"""You are writing an executive summary for an internal sales intelligence report produced by Modern Networks, a UK managed IT and connectivity provider.
+REPORT PURPOSE:
+This is an internal sales tool. The sales team will use it to identify and prioritise outreach to {a['audience']}. Key decision-makers are {a['decision_makers']}. The report should help the team understand which assets to target first, what conversation to open with, and why now is the right time.
 
-{context}
+TERRITORY: {area_str}
+TOTAL {noun.upper()} PROFILED: {len(items)}
 
-Write a concise executive summary of 3 paragraphs for this territory intelligence report. 
+KEY DATA:
+- Average gigabit coverage: {avg_gig if avg_gig is not None else 'no data'}%
+- Assets below 50% gigabit: {low_gig} of {len(ofcom_items)}
+- Assets with full fibre below 60%: {low_ff} of {len(ofcom_items)}
+- EPC data available for: {len(epc_items)} assets ({poor_epc} rated D or below, {good_epc} rated C or above)
+- Assets in EA Flood Zone 2 or 3: {flood_risk}
+- Sales opportunities identified: {len(opportunities)} ({high_opps} high priority)
 
-Territory data:
-{data_summary}
+TOP PROSPECTS:
+{top_prospects}
 
-Tone: This is for {tone}
+ASSET DETAIL:
+{chr(10).join(asset_detail)}
 
-Rules:
-- Write in UK English, active voice, short sentences
-- Be specific — use the actual numbers from the data
-- Be commercially direct — this is a sales tool, not an academic report
-- Do not use bullet points — flowing paragraphs only
-- Do not mention Modern Networks by name more than once
-- Do not pad — if there is no EPC or flood data, do not mention it
-- Each paragraph should make a distinct point: (1) what the territory looks like, (2) the key infrastructure gaps and opportunities, (3) recommended priority action
-- Maximum 200 words total
+RELEVANT SALES HOOKS:
+{a['hooks']}
 
-Write only the executive summary text. No headings, no preamble, no sign-off."""
+Write an executive summary of 4-5 substantial paragraphs covering:
+1. The overall territory picture — what kind of assets, what is the digital infrastructure story, what does it mean commercially
+2. The most significant connectivity gaps, naming specific assets, explaining what the gap means for operators and occupiers
+3. EPC and flood risk findings where the data supports it — connect to specific service conversations
+4. Top 2-3 priority prospects by name and exactly why each is a priority right now
+5. The most effective sales approach for this territory — opening angle, value proposition, timing
+
+Write in UK English, active voice, short sentences. Use specific numbers and names. Be commercially direct. No bullet points. No headings, preamble, or sign-off."""
 
 
 def _build_ai_gap_prompt(items, mode, area_str):
-    """Build the prompt for the AI gap analysis narrative."""
+    pass
+
+
+def _build_ai_gap_prompt(items, mode, area_str):
+    """Build the prompt for the AI gap analysis."""
+    AUDIENCE = {
+        "retail": {
+            "decision_makers":"centre directors, managing agents (CBRE, JLL, Savills, Cushman & Wakefield), and asset managers",
+            "context":        "Modern Networks provides managed IT and connectivity infrastructure to major UK retail and leisure destinations. Modern Networks holds WiredScore and SmartScore Accredited Professional status.",
+            "services":       "managed connectivity, full fibre, guest WiFi, Network-as-a-Service, EPOS connectivity, WiredScore/SmartScore AP services, managed IT, and network resilience",
+            "hooks":          "anchor tenant digital requirements, F&B and leisure connectivity needs, click-and-collect infrastructure, 2027 EPC commercial minimum, repositioning projects, and WiredScore/SmartScore certification",
+        },
+        "parks": {
+            "decision_makers":"park directors, estates managers, and parent university or institutional landlords",
+            "context":        "Modern Networks provides managed IT and connectivity infrastructure to UK science and innovation parks. Modern Networks holds WiredScore and SmartScore Accredited Professional status.",
+            "services":       "research-grade managed connectivity, full fibre, gigabit infrastructure, Network-as-a-Service, private 5G, WiredScore/SmartScore AP services, managed IT, and network resilience",
+            "hooks":          "research-grade bandwidth, tenant density, sector requirements (life sciences, AI, deep tech), PSTN switch-off, 2027 EPC minimum, smart campus, and WiredScore certification",
+        },
+        "intel": {
+            "decision_makers":"building managers, managing agents, and asset managers",
+            "context":        "Modern Networks provides managed IT and connectivity to UK commercial office buildings. Modern Networks holds WiredScore and SmartScore Accredited Professional status.",
+            "services":       "managed connectivity, full fibre, WiredScore/SmartScore AP services, managed IT, cybersecurity, and network resilience",
+            "hooks":          "flight-to-quality, WiredScore/SmartScore certification, 2027 EPC minimum, flood resilience, and office repurposing",
+        },
+    }
+    a    = AUDIENCE.get(mode, AUDIENCE["parks"])
     noun = "retail assets" if mode=="retail" else "science and innovation parks"
 
-    # Build a concise data brief for each asset
-    asset_briefs = []
-    for p in items[:20]:  # cap at 20 to keep prompt manageable
+    asset_detail = []
+    for p in items[:20]:
         o    = _get_ofcom_flat(p)
-        gig  = o.get("gigabit_pct", 0)
-        ff   = o.get("full_fibre_pct", 0)
-        g5   = o.get("outdoor_5g_pct", 0)
-        epc  = (p.get("epc") or {}).get("most_common","—")
-        flood= p.get("flood_risk","—")
+        epc  = (p.get("epc") or {}).get("most_common","unknown")
+        fl   = p.get("flood_risk","unknown")
         cos  = sum(1 for c in (p.get("companies") or []) if (c.get("company_status") or "").lower()=="active")
         if mode == "retail":
-            scale = f"GLA:{p.get('gla_sqft',0):,}sqft"
-            extra = f"type:{p.get('type','')}"
+            anchors = ", ".join((p.get("anchor_tenants") or [])[:3])
+            detail  = (f"{p.get('name','')} ({p.get('type','')}, {p.get('gla_sqft',0):,} sq ft, "
+                       f"landlord: {p.get('landlord','')}): "
+                       f"gigabit {o['gigabit_pct']:.0f}%, full fibre {o['full_fibre_pct']:.0f}%, "
+                       f"5G {o['outdoor_5g_pct']:.0f}%, EPC {epc}, flood {fl}, "
+                       f"{cos} active companies at postcode, anchors: {anchors or 'not specified'}"
+                       + (", REPOSITIONING UNDERWAY" if p.get("repositioning") else ""))
         else:
-            scale = f"tenants:{p.get('tenants','—')}"
-            extra = f"sector:{p.get('sector','—')}"
-        asset_briefs.append(
-            f"{p.get('name','')} ({p.get('postcode','')}) — gig:{gig:.0f}% ff:{ff:.0f}% 5g:{g5:.0f}% "
-            f"epc:{epc} flood:{flood} active_cos:{cos} {scale} {extra}"
-        )
+            detail = (f"{p.get('name','')} (sector: {p.get('sector','')}, {p.get('tenants','')} tenants, "
+                      f"operator: {p.get('operator','')}): "
+                      f"gigabit {o['gigabit_pct']:.0f}%, full fibre {o['full_fibre_pct']:.0f}%, "
+                      f"5G {o['outdoor_5g_pct']:.0f}%, EPC {epc}, flood {fl}, "
+                      f"{cos} active companies at postcode")
+        asset_detail.append(detail)
 
-    if mode == "retail":
-        tone = "retail property industry — speak to landlords and asset managers. Reference the 2027 EPC minimum, repositioning trends, anchor tenant connectivity needs, and WiredScore/SmartScore certification."
-    else:
-        tone = "science and innovation park sector — speak to park directors and estates teams. Reference research-grade connectivity, the PSTN switch-off, sector-specific requirements, and WiredScore certification."
+    return f"""You are a senior sales analyst at Modern Networks, a UK managed IT and connectivity provider. You are writing the gap analysis section of an internal sales intelligence report.
 
-    return f"""You are writing a gap analysis section for an internal sales intelligence report produced by Modern Networks, a UK managed IT and connectivity provider.
+ABOUT MODERN NETWORKS:
+{a['context']}
+Services: {a['services']}
 
-Territory: {area_str}
-Asset class: {noun}
+TERRITORY: {area_str}
+TARGET AUDIENCE: {a['decision_makers']}
 
-Asset data (one line per asset):
-{chr(10).join(asset_briefs)}
+ASSET DATA:
+{chr(10).join(asset_detail)}
 
-Write a gap analysis of 4-6 paragraphs that identifies the most significant digital infrastructure gaps and opportunities across this territory.
+RELEVANT SALES HOOKS:
+{a['hooks']}
 
-Tone: This is for {tone}
+Write a gap analysis of 5-7 substantial paragraphs covering:
 
-Rules:
-- Write in UK English, active voice, short sentences
-- Group related findings — do not write one paragraph per asset
-- Name specific assets when making a point about them
-- Be analytically sharp — identify patterns, not just facts
-- Do not use bullet points — flowing paragraphs only
-- Where connectivity, EPC, and flood risk combine at the same asset, call that out as a priority
-- Maximum 350 words total
+1. CONNECTIVITY GAPS: Which assets have the most critical shortfalls? Group assets with similar profiles. Explain what the gaps mean operationally for the asset operators and their tenants — not just the percentage figures.
 
-Write only the gap analysis text. No headings, no preamble."""
+2. EPC AND ENERGY: Where the data shows D or below ratings, identify which assets face the most pressure ahead of the 2027 commercial EPC minimum. Explain how a connectivity upgrade conversation fits naturally alongside an energy efficiency conversation at these assets.
+
+3. FLOOD RISK AND RESILIENCE: Where assets are in Flood Zone 2 or 3, name them and explain the specific network resilience and business continuity argument that is relevant to their operators.
+
+4. COMBINED-RISK PRIORITIES: Identify assets where multiple risk factors combine — connectivity gap plus poor EPC plus flood risk, or large scale plus repositioning. These represent the strongest sales cases. Explain specifically why.
+
+5. SALES AND MARKETING APPROACH: Recommend specific tactics for engaging the decision-makers at the priority assets. Should the approach be research-led (presenting the report findings as a value-add), event-led (UKSPA conference, Revo, BCSC), or relationship-led (approaching through their managing agent)? What is the strongest opening line for this specific territory? Are there timing factors — upcoming lease events, repositioning timelines, EPC deadlines — that create urgency?
+
+Write in UK English, active voice. Name specific assets. Be analytically sharp — find patterns, not just facts. No bullet points. No headings or preamble."""
+
+
 
 from datetime import datetime
 from reportlab.lib.pagesizes import A4
