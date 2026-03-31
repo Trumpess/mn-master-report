@@ -17,7 +17,7 @@ def _ai_narrative(prompt, fallback):
         if not api_key:
             return fallback
 
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={api_key}"
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={api_key}"
         r = requests.post(
             url,
             headers={"Content-Type": "application/json"},
