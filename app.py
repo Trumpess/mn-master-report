@@ -2,6 +2,146 @@ import streamlit as st
 import json
 import io
 import requests
+
+# ── AI NARRATIVE ───────────────────────────────────────────────────────────────
+def _ai_narrative(prompt, fallback):
+    """
+    Call the Claude API to generate a narrative section.
+    Returns the AI text if successful, or fallback text if anything goes wrong.
+    """
+    try:
+        r = requests.post(
+            "https://api.anthropic.com/v1/messages",
+            headers={"Content-Type": "application/json"},
+            json={
+                "model": "claude-sonnet-4-20250514",
+                "max_tokens": 1000,
+                "messages": [{"role": "user", "content": prompt}],
+            },
+            timeout=30,
+        )
+        if r.status_code == 200:
+            blocks = r.json().get("content", [])
+            text = " ".join(b.get("text","") for b in blocks if b.get("type")=="text").strip()
+            if text:
+                return text
+    except Exception:
+        pass
+    return fallback
+
+
+def _build_ai_exec_prompt(items, mode, area_str, opportunities, enriched):
+    """Build the prompt for the AI executive summary."""
+    noun = "retail assets" if mode=="retail" else "science and innovation parks"
+    high_opps = sum(1 for o in opportunities if o["priority"]=="High")
+
+    # Summarise key data points
+    ofcom_items = [p for p in items if _get_ofcom_flat(p).get("gigabit_pct") is not None]
+    avg_gig = round(sum(_get_ofcom_flat(p)["gigabit_pct"] for p in ofcom_items)/len(ofcom_items)) if ofcom_items else None
+    low_gig = sum(1 for p in ofcom_items if _get_ofcom_flat(p)["gigabit_pct"] < 50) if ofcom_items else 0
+    epc_items = [p for p in items if p.get("epc")]
+    poor_epc  = sum(1 for p in epc_items if (p.get("epc") or {}).get("most_common","") in ("D","E","F","G"))
+    flood_high= sum(1 for p in items if p.get("flood_risk","")=="Zone 3 (High)")
+    flood_med = sum(1 for p in items if p.get("flood_risk","")=="Zone 2 (Medium)")
+    flags     = _prospect_flags(items, mode)
+    top3      = ", ".join(p["name"] for p in flags[:3]) if flags else ""
+
+    data_summary = f"""
+Territory: {area_str}
+Asset class: {noun}
+Total {noun}: {len(items)}
+Average gigabit coverage: {avg_gig}% (across {len(ofcom_items)} with Ofcom data)
+Assets below 50% gigabit: {low_gig}
+Assets with EPC data: {len(epc_items)} ({poor_epc} rated D or below)
+Assets in flood zone 2 or 3: {flood_high + flood_med}
+Total opportunities identified: {len(opportunities)} ({high_opps} high priority)
+Top prospects by opportunity score: {top3}
+"""
+
+    if mode == "retail":
+        context = "Modern Networks provides managed IT and connectivity infrastructure to major UK retail and leisure destinations including Manchester Arndale, Centre MK, and Watford. Modern Networks holds WiredScore and SmartScore Accredited Professional status."
+        tone    = "retail property — speak to landlords, asset managers, and property directors. Reference anchor tenant requirements, footfall, F&B and leisure operators, click-and-collect, and the 2027 EPC minimum where relevant."
+    else:
+        context = "Modern Networks provides managed IT and connectivity infrastructure to UK science and innovation parks. Modern Networks holds WiredScore and SmartScore Accredited Professional status."
+        tone    = "science and innovation parks — speak to park directors and estates managers. Reference research-grade connectivity, tenant density, sector requirements (life sciences, deep tech, AI), and the 2027 EPC minimum where relevant."
+
+    return f"""You are writing an executive summary for an internal sales intelligence report produced by Modern Networks, a UK managed IT and connectivity provider.
+
+{context}
+
+Write a concise executive summary of 3 paragraphs for this territory intelligence report. 
+
+Territory data:
+{data_summary}
+
+Tone: This is for {tone}
+
+Rules:
+- Write in UK English, active voice, short sentences
+- Be specific — use the actual numbers from the data
+- Be commercially direct — this is a sales tool, not an academic report
+- Do not use bullet points — flowing paragraphs only
+- Do not mention Modern Networks by name more than once
+- Do not pad — if there is no EPC or flood data, do not mention it
+- Each paragraph should make a distinct point: (1) what the territory looks like, (2) the key infrastructure gaps and opportunities, (3) recommended priority action
+- Maximum 200 words total
+
+Write only the executive summary text. No headings, no preamble, no sign-off."""
+
+
+def _build_ai_gap_prompt(items, mode, area_str):
+    """Build the prompt for the AI gap analysis narrative."""
+    noun = "retail assets" if mode=="retail" else "science and innovation parks"
+
+    # Build a concise data brief for each asset
+    asset_briefs = []
+    for p in items[:20]:  # cap at 20 to keep prompt manageable
+        o    = _get_ofcom_flat(p)
+        gig  = o.get("gigabit_pct", 0)
+        ff   = o.get("full_fibre_pct", 0)
+        g5   = o.get("outdoor_5g_pct", 0)
+        epc  = (p.get("epc") or {}).get("most_common","—")
+        flood= p.get("flood_risk","—")
+        cos  = sum(1 for c in (p.get("companies") or []) if (c.get("company_status") or "").lower()=="active")
+        if mode == "retail":
+            scale = f"GLA:{p.get('gla_sqft',0):,}sqft"
+            extra = f"type:{p.get('type','')}"
+        else:
+            scale = f"tenants:{p.get('tenants','—')}"
+            extra = f"sector:{p.get('sector','—')}"
+        asset_briefs.append(
+            f"{p.get('name','')} ({p.get('postcode','')}) — gig:{gig:.0f}% ff:{ff:.0f}% 5g:{g5:.0f}% "
+            f"epc:{epc} flood:{flood} active_cos:{cos} {scale} {extra}"
+        )
+
+    if mode == "retail":
+        tone = "retail property industry — speak to landlords and asset managers. Reference the 2027 EPC minimum, repositioning trends, anchor tenant connectivity needs, and WiredScore/SmartScore certification."
+    else:
+        tone = "science and innovation park sector — speak to park directors and estates teams. Reference research-grade connectivity, the PSTN switch-off, sector-specific requirements, and WiredScore certification."
+
+    return f"""You are writing a gap analysis section for an internal sales intelligence report produced by Modern Networks, a UK managed IT and connectivity provider.
+
+Territory: {area_str}
+Asset class: {noun}
+
+Asset data (one line per asset):
+{chr(10).join(asset_briefs)}
+
+Write a gap analysis of 4-6 paragraphs that identifies the most significant digital infrastructure gaps and opportunities across this territory.
+
+Tone: This is for {tone}
+
+Rules:
+- Write in UK English, active voice, short sentences
+- Group related findings — do not write one paragraph per asset
+- Name specific assets when making a point about them
+- Be analytically sharp — identify patterns, not just facts
+- Do not use bullet points — flowing paragraphs only
+- Where connectivity, EPC, and flood risk combine at the same asset, call that out as a priority
+- Maximum 350 words total
+
+Write only the gap analysis text. No headings, no preamble."""
+
 from datetime import datetime
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.units import mm
@@ -434,63 +574,66 @@ def _pdf_cover(story, S, report_title, prepared_by, mode, stats_data):
     story.append(st_t)
     story.append(Spacer(1, 6*mm))
 
-def _pdf_exec_summary(story, S, items, mode, opportunities, area_str):
+def _pdf_exec_summary(story, S, items, mode, opportunities, area_str, use_ai=False):
     story.append(_bar("EXECUTIVE SUMMARY", S))
     story.append(Spacer(1, 4*mm))
 
-    noun = "assets" if mode=="retail" else "parks"
-    high_opps = sum(1 for o in opportunities if o["priority"]=="High")
-    enriched  = any(p.get("epc") or p.get("companies") or p.get("flood_risk") for p in items)
+    noun     = "assets" if mode=="retail" else "parks"
+    enriched = any(p.get("epc") or p.get("companies") or p.get("flood_risk") for p in items)
+    high_opps= sum(1 for o in opportunities if o["priority"]=="High")
 
-    lines = []
-    lines.append(
+    # Build template fallback first
+    flags    = _prospect_flags(items, mode)
+    ofcom_items = [p for p in items if _get_ofcom_flat(p).get("gigabit_pct") is not None]
+    fallback_lines = []
+    fallback_lines.append(
         f"This report covers digital infrastructure intelligence for {area_str}, "
         f"profiling {len(items)} {'retail asset' if mode=='retail' else 'science and innovation park'}{'s' if len(items)!=1 else ''}."
     )
-
-    if items and enriched:
-        ofcom_items = [p for p in items if _get_ofcom_flat(p).get("gigabit_pct") is not None]
-        if ofcom_items:
-            avg_gig = round(sum(_get_ofcom_flat(p)["gigabit_pct"] for p in ofcom_items)/len(ofcom_items))
-            low_gig = sum(1 for p in ofcom_items if _get_ofcom_flat(p)["gigabit_pct"] < 50)
-            lines.append(
-                f"Connectivity analysis shows an average gigabit coverage of {avg_gig}% across the territory. "
-                f"{low_gig} of {len(ofcom_items)} {noun} are in areas below the 50% gigabit threshold — "
-                f"the point below which connectivity upgrades become a primary sales conversation."
-            )
-        epc_items = [p for p in items if p.get("epc")]
-        if epc_items:
-            poor = sum(1 for p in epc_items if (p.get("epc") or {}).get("most_common","") in ("D","E","F","G"))
-            lines.append(
-                f"Energy performance data is available for {len(epc_items)} {noun}. "
-                f"{poor} show a most common EPC rating of D or below, creating a combined connectivity "
-                f"and energy upgrade conversation ahead of the proposed 2027 commercial EPC minimum."
-            )
-        flood_items = [p for p in items if p.get("flood_risk","") in ("Zone 3 (High)","Zone 2 (Medium)")]
-        if flood_items:
-            lines.append(
-                f"{len(flood_items)} {'asset' if len(flood_items)==1 else noun} "
-                f"{'sits' if len(flood_items)==1 else 'sit'} in EA Flood Zone 2 or 3, making network "
-                f"resilience and business continuity a relevant service conversation."
-            )
-
-    flags = _prospect_flags(items, mode)
+    if ofcom_items:
+        avg_gig = round(sum(_get_ofcom_flat(p)["gigabit_pct"] for p in ofcom_items)/len(ofcom_items))
+        low_gig = sum(1 for p in ofcom_items if _get_ofcom_flat(p)["gigabit_pct"] < 50)
+        fallback_lines.append(
+            f"Connectivity analysis shows an average gigabit coverage of {avg_gig}% across the territory. "
+            f"{low_gig} of {len(ofcom_items)} {noun} are in areas below the 50% gigabit threshold."
+        )
     if flags:
         top3 = ", ".join(p["name"] for p in flags[:3])
-        lines.append(
-            f"Opportunity scoring identifies {top3} as the highest-priority prospects in this territory. "
-            f"Full rankings are included in the Territory Rankings section."
+        fallback_lines.append(
+            f"Opportunity scoring identifies {top3} as the highest-priority prospects in this territory."
         )
-
-    lines.append(
+    fallback_lines.append(
         f"The analysis has identified {len(opportunities)} service opportunities for Modern Networks, "
-        f"of which {high_opps} are high priority. Opportunities span connectivity upgrades, "
-        f"WiredScore and SmartScore certification, managed IT services, and network resilience."
+        f"of which {high_opps} are high priority."
     )
+    fallback_text = " ".join(fallback_lines)
 
-    for line in lines:
-        story.append(Paragraph(line, S["body"]))
-        story.append(Spacer(1, 3*mm))
+    if use_ai and items and enriched:
+        prompt = _build_ai_exec_prompt(items, mode, area_str, opportunities, enriched)
+        text   = _ai_narrative(prompt, fallback_text)
+        # Split on double newlines or ". " boundaries into paragraphs
+        paras  = [p.strip() for p in text.split("\n\n") if p.strip()]
+        if len(paras) == 1:
+            # Try splitting into ~3 chunks by sentence
+            sentences = text.split(". ")
+            third = max(1, len(sentences)//3)
+            paras = [
+                ". ".join(sentences[:third]) + ".",
+                ". ".join(sentences[third:2*third]) + ".",
+                ". ".join(sentences[2*third:]),
+            ]
+            paras = [p.strip() for p in paras if p.strip()]
+        for para in paras:
+            story.append(Paragraph(para, S["body"]))
+            story.append(Spacer(1, 3*mm))
+        story.append(Paragraph(
+            "AI-assisted narrative — Modern Networks Building Intelligence Platform",
+            S["small"]))
+    else:
+        for line in fallback_lines:
+            story.append(Paragraph(line, S["body"]))
+            story.append(Spacer(1, 3*mm))
+
     story.append(PageBreak())
 
 def _pdf_asset_table(story, S, upload, mode):
@@ -596,12 +739,29 @@ def _pdf_rankings(story, S, items, mode, flags):
     story.append(t)
     story.append(PageBreak())
 
-def _pdf_gap_analysis(story, S, items, mode):
+def _pdf_gap_analysis(story, S, items, mode, area_str="", use_ai=False):
     story.append(_bar("TERRITORY GAP ANALYSIS", S))
     story.append(Spacer(1, 4*mm))
-    for para in _gap_narrative(items, mode):
-        story.append(Paragraph(para, S["body"]))
-        story.append(Spacer(1, 4*mm))
+
+    if use_ai and items:
+        fallback_paras = _gap_narrative(items, mode)
+        fallback_text  = " ".join(fallback_paras)
+        prompt = _build_ai_gap_prompt(items, mode, area_str)
+        text   = _ai_narrative(prompt, fallback_text)
+        paras  = [p.strip() for p in text.split("\n\n") if p.strip()]
+        if not paras:
+            paras = [text]
+        for para in paras:
+            story.append(Paragraph(para, S["body"]))
+            story.append(Spacer(1, 4*mm))
+        story.append(Paragraph(
+            "AI-assisted analysis — Modern Networks Building Intelligence Platform",
+            S["small"]))
+    else:
+        for para in _gap_narrative(items, mode):
+            story.append(Paragraph(para, S["body"]))
+            story.append(Spacer(1, 4*mm))
+
     story.append(PageBreak())
 
 def _pdf_prospect_flags(story, S, flags):
@@ -737,7 +897,7 @@ def _pdf_appendix(story, S, mode):
         story.append(Spacer(1, 3*mm))
 
 # ── MAIN PDF GENERATOR ─────────────────────────────────────────────────────────
-def generate_pdf(uploads, intel_uploads, mode, report_title, prepared_by):
+def generate_pdf(uploads, intel_uploads, mode, report_title, prepared_by, use_ai=False):
     buf = io.BytesIO()
     S   = _styles()
     doc = SimpleDocTemplate(buf, pagesize=A4, leftMargin=M, rightMargin=M,
@@ -784,12 +944,12 @@ def generate_pdf(uploads, intel_uploads, mode, report_title, prepared_by):
         story.append(PageBreak())
         _pdf_building_intel(story, S, intel_uploads)
     else:
-        _pdf_exec_summary(story, S, items, mode, opps, area_str)
+        _pdf_exec_summary(story, S, items, mode, opps, area_str, use_ai=use_ai)
         for upload in uploads:
             _pdf_asset_table(story, S, upload, mode)
         if enriched and flags:
             _pdf_rankings(story, S, items, mode, flags)
-            _pdf_gap_analysis(story, S, items, mode)
+            _pdf_gap_analysis(story, S, items, mode, area_str=area_str, use_ai=use_ai)
             _pdf_prospect_flags(story, S, flags)
 
     _pdf_action_list(story, S, opps)
@@ -924,14 +1084,20 @@ with col2:
 
         st.divider()
 
+        use_ai = st.toggle("✨ AI-powered narrative (executive summary & gap analysis)",
+                           value=True,
+                           help="Uses Claude AI to write the executive summary and gap analysis in natural language. Falls back to template text if unavailable.")
+
         if st.button("⬇ Generate Report", type="primary", use_container_width=True):
             if not report_title:
                 st.warning("Please enter a report title first.")
             else:
-                with st.spinner("Building report…"):
+                spinner_msg = "Building report with AI narrative…" if use_ai else "Building report…"
+                with st.spinner(spinner_msg):
                     pdf_bytes = generate_pdf(
                         asset_ups, intel_ups, mode_key,
-                        report_title, prepared_by or "MN Staff"
+                        report_title, prepared_by or "MN Staff",
+                        use_ai=use_ai
                     )
                 safe = report_title.replace(" ","-").replace("/","-")
                 st.download_button("⬇ Download Report", data=pdf_bytes,
