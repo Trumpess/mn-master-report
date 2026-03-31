@@ -6,27 +6,42 @@ import requests
 # ── AI NARRATIVE ───────────────────────────────────────────────────────────────
 def _ai_narrative(prompt, fallback):
     """
-    Call the Claude API to generate a narrative section.
+    Call the Gemini API to generate a narrative section.
+    Reads the Google AI key from Streamlit secrets (GEMINI_API_KEY).
     Returns the AI text if successful, or fallback text if anything goes wrong.
     """
     try:
+        api_key = ""
+        if hasattr(st, "secrets"):
+            api_key = st.secrets.get("GEMINI_API_KEY", "")
+        if not api_key:
+            return fallback
+
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={api_key}"
         r = requests.post(
-            "https://api.anthropic.com/v1/messages",
+            url,
             headers={"Content-Type": "application/json"},
             json={
-                "model": "claude-sonnet-4-20250514",
-                "max_tokens": 1000,
-                "messages": [{"role": "user", "content": prompt}],
+                "contents": [{"parts": [{"text": prompt}]}],
+                "generationConfig": {
+                    "temperature":     0.7,
+                    "maxOutputTokens": 2000,
+                },
             },
-            timeout=30,
+            timeout=45,
         )
         if r.status_code == 200:
-            blocks = r.json().get("content", [])
-            text = " ".join(b.get("text","") for b in blocks if b.get("type")=="text").strip()
-            if text:
-                return text
-    except Exception:
-        pass
+            candidates = r.json().get("candidates", [])
+            if candidates:
+                parts = candidates[0].get("content", {}).get("parts", [])
+                text  = "\n\n".join(p.get("text","") for p in parts if p.get("text")).strip()
+                if text:
+                    # Clear any previous error
+                    st.session_state.pop("ai_last_error", None)
+                    return text
+        st.session_state["ai_last_error"] = f"Gemini API returned {r.status_code}: {r.text[:300]}"
+    except Exception as e:
+        st.session_state["ai_last_error"] = str(e)
     return fallback
 
 
@@ -1152,9 +1167,16 @@ with col2:
 
         st.divider()
 
+        has_ai_key = bool(st.secrets.get("GEMINI_API_KEY","")) if hasattr(st,"secrets") else False
+        if has_ai_key:
+            st.success("✓ Gemini API key loaded")
+        else:
+            st.warning("Gemini API key not set — AI narrative unavailable. Add GEMINI_API_KEY to secrets.")
+
         use_ai = st.toggle("✨ AI-powered narrative (executive summary & gap analysis)",
-                           value=True,
-                           help="Uses Claude AI to write the executive summary and gap analysis in natural language. Falls back to template text if unavailable.")
+                           value=has_ai_key,
+                           disabled=not has_ai_key,
+                           help="Uses Google Gemini to write the executive summary and gap analysis. Requires GEMINI_API_KEY in Streamlit secrets.")
 
         if st.button("⬇ Generate Report", type="primary", use_container_width=True):
             if not report_title:
@@ -1171,4 +1193,11 @@ with col2:
                 st.download_button("⬇ Download Report", data=pdf_bytes,
                     file_name=f"MN-{mode_key.title()}-{safe}-{datetime.now().strftime('%Y%m%d')}.pdf",
                     mime="application/pdf", use_container_width=True)
-                st.success("Report generated.")
+                if use_ai:
+                    err = st.session_state.get("ai_last_error","")
+                    if err:
+                        st.warning(f"AI narrative fell back to template — {err}")
+                    else:
+                        st.success("Report generated with AI narrative.")
+                else:
+                    st.success("Report generated.")
