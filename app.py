@@ -4,47 +4,6 @@ import io
 import requests
 
 # ── AI NARRATIVE ───────────────────────────────────────────────────────────────
-def _ai_narrative(prompt, fallback):
-    """
-    Call the Gemini API to generate a narrative section.
-    Reads the Google AI key from Streamlit secrets (GEMINI_API_KEY).
-    Returns the AI text if successful, or fallback text if anything goes wrong.
-    """
-    try:
-        api_key = ""
-        if hasattr(st, "secrets"):
-            api_key = st.secrets.get("GEMINI_API_KEY", "")
-        if not api_key:
-            return fallback
-
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={api_key}"
-        r = requests.post(
-            url,
-            headers={"Content-Type": "application/json"},
-            json={
-                "contents": [{"parts": [{"text": prompt}]}],
-                "generationConfig": {
-                    "temperature":     0.7,
-                    "maxOutputTokens": 2000,
-                },
-            },
-            timeout=45,
-        )
-        if r.status_code == 200:
-            candidates = r.json().get("candidates", [])
-            if candidates:
-                parts = candidates[0].get("content", {}).get("parts", [])
-                text  = "\n\n".join(p.get("text","") for p in parts if p.get("text")).strip()
-                if text:
-                    # Clear any previous error
-                    st.session_state.pop("ai_last_error", None)
-                    return text
-        st.session_state["ai_last_error"] = f"Gemini API returned {r.status_code}: {r.text[:300]}"
-    except Exception as e:
-        st.session_state["ai_last_error"] = str(e)
-    return fallback
-
-
 def _build_ai_exec_prompt(items, mode, area_str, opportunities, enriched):
     """Build the prompt for the AI executive summary."""
     AUDIENCE = {
@@ -395,98 +354,216 @@ def _get_items(uploads):
 
 # ── NARRATIVE GENERATORS ───────────────────────────────────────────────────────
 def _gap_narrative(items, mode):
-    """Return list of plain-English paragraph strings for the territory."""
+    """
+    Return a list of commercially focused paragraph strings for the gap analysis.
+    Each paragraph is specific, names assets, and connects data to sales conversations.
+    """
     if not items:
         return ["No data available for gap analysis."]
 
-    total   = len(items)
-    noun    = "assets" if mode == "retail" else "parks"
-    paras   = []
+    total = len(items)
+    noun  = "assets" if mode == "retail" else "parks"
 
+    # Audience and approach by mode
+    if mode == "retail":
+        audience      = "shopping centre and retail park management teams and their managing agents"
+        cert_hook     = "WiredScore and SmartScore certification is an increasingly expected credential for major retail schemes — landlords and asset managers use it to differentiate their assets in a competitive occupier market"
+        epc_context   = "retail landlords and asset managers"
+        flood_context = "anchor tenant operations, EPOS systems, and digital infrastructure — all of which require network resilience planning"
+        cos_context   = "the addressable occupier base for estate-wide managed connectivity, IT support, and M365 services across all retailer units"
+        approach      = "The strongest opening for this territory is a research-led approach — presenting this report's findings to the centre director or managing agent as a value-add, not a sales pitch. Where assets are managed by major agents such as CBRE, JLL, Savills, or Cushman & Wakefield, approaching through the agent relationship is likely more effective than going direct to the landlord."
+    elif mode == "parks":
+        audience      = "park directors, estates managers, and parent university or institutional landlords"
+        cert_hook     = "WiredScore certification is a growing expectation among premium science park tenants — particularly life sciences, AI, and deep tech companies who treat connectivity as a prerequisite, not a nice-to-have"
+        epc_context   = "park operators and their institutional landlords"
+        flood_context = "research continuity, data integrity, and laboratory operations — all sectors where downtime has direct financial and reputational consequences"
+        cos_context   = "the addressable tenant base for campus-wide managed connectivity, IT support, and M365 services"
+        approach      = "The most effective approach for science parks is research-led — presenting the connectivity and infrastructure findings as a sector intelligence service, not a sales pitch. Park directors respond well to being treated as informed professionals. Where parks are part of a university estate or institutional portfolio, the route to the decision-maker is often through the estates team rather than the park management office."
+    else:
+        audience      = "building managers and their managing agents"
+        cert_hook     = "WiredScore and SmartScore certification is increasingly expected by premium office tenants and is a differentiator in a flight-to-quality market"
+        epc_context   = "building owners and managing agents"
+        flood_context = "tenant operations, server rooms, and network infrastructure — all of which require resilience planning and business continuity documentation"
+        cos_context   = "the addressable occupier base for building-wide managed connectivity, IT support, and M365 services"
+        approach      = "The most effective approach is through the managing agent relationship — CBRE, JLL, Savills, and Cushman & Wakefield control access to the majority of significant assets in this territory."
+
+    paras = []
+
+    # ── Opening: territory characterisation ──────────────────────────────────
     ofcom_items = [p for p in items if _get_ofcom_flat(p).get("gigabit_pct") is not None]
     if ofcom_items:
+        avg_gig = round(sum(_get_ofcom_flat(p)["gigabit_pct"] for p in ofcom_items) / len(ofcom_items))
+        avg_ff  = round(sum(_get_ofcom_flat(p)["full_fibre_pct"] for p in ofcom_items) / len(ofcom_items))
         low_gig = [p for p in ofcom_items if _get_ofcom_flat(p)["gigabit_pct"] < 50]
-        low_ff  = [p for p in ofcom_items if _get_ofcom_flat(p)["full_fibre_pct"] < 60]
-        low_5g  = [p for p in ofcom_items if _get_ofcom_flat(p)["outdoor_5g_pct"] < 40]
+        mid_gig = [p for p in ofcom_items if 50 <= _get_ofcom_flat(p)["gigabit_pct"] < 75]
+        high_gig= [p for p in ofcom_items if _get_ofcom_flat(p)["gigabit_pct"] >= 75]
 
         if low_gig:
-            pct   = round(len(low_gig)/total*100)
             names = ", ".join(p.get("name","") for p in low_gig[:3])
-            extra = f" — including {names}" + (f" and {len(low_gig)-3} others" if len(low_gig)>3 else "")
+            tail  = f" and {len(low_gig)-3} others" if len(low_gig) > 3 else ""
             paras.append(
-                f"{len(low_gig)} of {total} {noun} ({pct}%) are in local authority areas where gigabit "
-                f"broadband coverage is below 50%{extra}. This represents a direct connectivity upgrade "
-                f"opportunity and should be the primary conversation opener at these locations."
+                f"Connectivity across this territory is uneven. The average gigabit coverage is {avg_gig}%, "
+                f"but {len(low_gig)} of {len(ofcom_items)} {noun} — {names}{tail} — sit in local authority "
+                f"areas where gigabit availability is below 50%. At this level, campus-wide connectivity "
+                f"upgrades are the primary sales conversation: the infrastructure gap is material enough "
+                f"that {audience} will recognise it as a competitive disadvantage, particularly where "
+                f"tenants or occupiers have high-bandwidth requirements."
             )
+        elif mid_gig:
+            names = ", ".join(p.get("name","") for p in mid_gig[:3])
+            paras.append(
+                f"Connectivity across this territory averages {avg_gig}% gigabit coverage, with "
+                f"{len(mid_gig)} {noun} — including {names} — in the 50-75% range. "
+                f"This middle band is commercially interesting: coverage is available but not universal, "
+                f"meaning the gap between what is technically possible and what occupiers actually experience "
+                f"is often significant. A managed connectivity audit at each of these sites is the "
+                f"recommended opening conversation."
+            )
+        else:
+            paras.append(
+                f"Connectivity across this territory is strong — average gigabit coverage is {avg_gig}% "
+                f"and {len(high_gig)} of {len(ofcom_items)} {noun} are in areas above 75% availability. "
+                f"Where coverage is already strong, the primary sales conversation shifts from infrastructure "
+                f"gap to certification and service quality — WiredScore, SmartScore, and managed network "
+                f"services that monetise the existing infrastructure investment."
+            )
+
+        # Full fibre take-up gap
+        low_ff = [p for p in ofcom_items if _get_ofcom_flat(p)["full_fibre_pct"] < 60]
         if low_ff and len(low_ff) != len(low_gig):
+            names = ", ".join(p.get("name","") for p in low_ff[:3])
             paras.append(
-                f"A further {len(low_ff)} {noun} have full fibre availability below 60%, indicating that "
-                f"legacy broadband infrastructure may be limiting digital capability. "
-                f"A managed connectivity assessment is recommended at each site."
+                f"Full fibre availability is below 60% at {len(low_ff)} {noun}, including {names}. "
+                f"This is a separate issue from gigabit coverage — it indicates that legacy copper-based "
+                f"broadband may still be the primary connection for many occupiers, with the reliability "
+                f"and speed limitations that implies. A managed connectivity assessment at these sites "
+                f"will typically identify significant upgrade opportunities that have not yet been "
+                f"acted on, often because the landlord or managing agent has not been presented with "
+                f"a clear business case."
             )
+
+        # 5G
+        low_5g = [p for p in ofcom_items if _get_ofcom_flat(p)["outdoor_5g_pct"] < 40]
         if low_5g:
+            names = ", ".join(p.get("name","") for p in low_5g[:3])
+            extra = " and IoT sensor networks" if mode == "parks" else " and delivery management systems"
             paras.append(
-                f"{len(low_5g)} {noun} have outdoor 5G coverage below 40%, limiting mobile-first "
-                f"applications{', smart campus operations,' if mode=='parks' else ', delivery management,'} "
-                f"and IoT use cases. Private 5G and indoor mobile enhancement are relevant service conversations."
+                f"Outdoor 5G coverage is below 40% at {len(low_5g)} {noun} including {names}, "
+                f"which limits mobile-first applications{extra}. "
+                f"Private 5G networks and indoor mobile enhancement are relevant service conversations "
+                f"at these locations — particularly where the asset operator is considering smart "
+                f"building or smart campus applications."
             )
 
-    epc_items  = [p for p in items if p.get("epc")]
-    poor_epc   = [p for p in epc_items if (p.get("epc") or {}).get("most_common","") in ("D","E","F","G")]
-    if poor_epc:
-        paras.append(
-            f"{len(poor_epc)} of {len(epc_items)} {noun} with EPC data show a most common rating of D or below. "
-            f"With the proposed 2027 commercial EPC minimum of C, these assets face significant upgrade pressure. "
-            f"Connectivity modernisation conversations can be paired with energy efficiency messaging — "
-            f"both point to the same infrastructure investment cycle."
-        )
-    elif epc_items:
+    # ── EPC section ──────────────────────────────────────────────────────────
+    epc_items = [p for p in items if p.get("epc")]
+    if epc_items:
+        poor_epc = [p for p in epc_items if (p.get("epc") or {}).get("most_common","") in ("D","E","F","G")]
         good_epc = [p for p in epc_items if (p.get("epc") or {}).get("most_common","") in ("A","B","C")]
-        if good_epc:
+        if poor_epc:
+            names = ", ".join(p.get("name","") for p in poor_epc[:3])
+            tail  = f" and {len(poor_epc)-3} others" if len(poor_epc) > 3 else ""
             paras.append(
-                f"{len(good_epc)} of {len(epc_items)} {noun} show EPC ratings of C or above, indicating "
-                f"well-maintained building stock. WiredScore and SmartScore certification is the natural "
-                f"next conversation — the infrastructure investment case is already present."
+                f"{len(poor_epc)} of {len(epc_items)} {noun} with EPC data — {names}{tail} — show a "
+                f"most common non-domestic certificate rating of D or below. "
+                f"With the proposed 2027 commercial EPC minimum of C, {epc_context} at these assets "
+                f"face a defined and time-limited upgrade pressure. The connectivity modernisation "
+                f"conversation fits naturally here: both EPC improvement and connectivity upgrades "
+                f"involve the same capital expenditure decision cycle and often the same decision-makers. "
+                f"Positioning Modern Networks as a partner in the broader infrastructure upgrade — "
+                f"not just a connectivity provider — is the most effective framing."
+            )
+        elif good_epc:
+            names = ", ".join(p.get("name","") for p in good_epc[:3])
+            paras.append(
+                f"{len(good_epc)} of {len(epc_items)} {noun} — including {names} — show EPC ratings "
+                f"of C or above, indicating well-maintained and relatively modern building stock. "
+                f"Where energy performance is already strong, the infrastructure investment case is "
+                f"already present. {cert_hook}. "
+                f"These assets are well-positioned for WiredScore and SmartScore certification "
+                f"conversations — the physical infrastructure is likely to meet certification "
+                f"requirements, and MN's Accredited Professional status means we can manage the "
+                f"certification process end to end."
             )
 
+    # ── Flood risk ────────────────────────────────────────────────────────────
     flood_high = [p for p in items if p.get("flood_risk","") == "Zone 3 (High)"]
     flood_med  = [p for p in items if p.get("flood_risk","") == "Zone 2 (Medium)"]
     if flood_high:
-        names = ", ".join(p.get("name","") for p in flood_high[:2])
+        names = ", ".join(p.get("name","") for p in flood_high[:3])
         paras.append(
-            f"{len(flood_high)} {'asset' if len(flood_high)==1 else noun} {'is' if len(flood_high)==1 else 'are'} "
-            f"in EA Flood Zone 3 ({names}{'...' if len(flood_high)>2 else ''}). "
-            f"Network resilience, dual-path routing, and business continuity planning are high-relevance "
-            f"service lines at these locations."
+            f"{len(flood_high)} {'asset is' if len(flood_high)==1 else noun+' are'} in EA Flood Zone 3 "
+            f"— {names}. Zone 3 carries a high probability of flooding, which has direct implications "
+            f"for {flood_context}. The conversation here is network resilience: dual-path routing, "
+            f"hardened infrastructure, and documented business continuity planning. "
+            f"For asset managers and managing agents, this is a risk management conversation as much "
+            f"as a technology one, and Modern Networks' experience with enterprise resilience "
+            f"architecture is a relevant differentiator."
         )
     elif flood_med:
+        names = ", ".join(p.get("name","") for p in flood_med[:2])
         paras.append(
-            f"{len(flood_med)} {'asset' if len(flood_med)==1 else noun} "
-            f"{'sits' if len(flood_med)==1 else 'sit'} in EA Flood Zone 2. "
-            f"Infrastructure resilience is a relevant conversation, particularly for "
-            f"{'research-intensive occupiers' if mode!='retail' else 'anchor tenants'} with continuity obligations."
+            f"{len(flood_med)} {'asset sits' if len(flood_med)==1 else noun+' sit'} in EA Flood Zone 2 "
+            f"— {names}. While Zone 2 carries medium rather than high flood probability, "
+            f"it is sufficient to make network resilience a relevant conversation, "
+            f"particularly for occupiers with continuity obligations. "
+            f"A resilience assessment and dual-path routing proposal is the appropriate opening."
         )
 
+    # ── Companies House / occupier density ───────────────────────────────────
     cos_items = [p for p in items if p.get("companies")]
     if cos_items:
         total_active = sum(
-            sum(1 for c in (p.get("companies") or []) if (c.get("company_status") or "").lower()=="active")
+            sum(1 for c in (p.get("companies") or [])
+                if (c.get("company_status") or "").lower() == "active")
             for p in cos_items
         )
-        paras.append(
-            f"Across {len(cos_items)} {noun} with Companies House data, "
-            f"{total_active} active registered companies were identified at postcodes. "
-            f"This represents the addressable occupier base for estate-wide managed connectivity, "
-            f"IT support, and M365 services."
-        )
+        high_cos = sorted(
+            [(p, sum(1 for c in (p.get("companies") or [])
+                     if (c.get("company_status") or "").lower() == "active"))
+             for p in cos_items],
+            key=lambda x: -x[1]
+        )[:3]
+        cos_detail = ", ".join(f"{p.get('name','')} ({n} companies)" for p, n in high_cos if n > 0)
+        if total_active > 0:
+            paras.append(
+                f"Companies House data identifies {total_active} active registered companies "
+                f"across {len(cos_items)} {noun} in this territory. "
+                f"The highest concentrations are at {cos_detail}. "
+                f"This represents {cos_context}. "
+                f"At scale, a campus-wide or estate-wide contract is significantly more cost-effective "
+                f"for both the asset operator and individual occupiers than per-unit procurement — "
+                f"and positions Modern Networks as the infrastructure partner for the whole estate "
+                f"rather than a supplier to individual tenants."
+            )
+
+    # ── Repositioning (retail only) ───────────────────────────────────────────
+    if mode == "retail":
+        reposition_items = [p for p in items if p.get("repositioning")]
+        if reposition_items:
+            names = ", ".join(p.get("name","") for p in reposition_items[:3])
+            paras.append(
+                f"{len(reposition_items)} {'asset is' if len(reposition_items)==1 else 'assets are'} "
+                f"currently undergoing or planning significant repositioning or redevelopment — {names}. "
+                f"Repositioning projects represent the strongest possible sales opportunity: "
+                f"the infrastructure brief is live, decisions are being made now, and specifying "
+                f"modern network infrastructure from the outset is far more cost-effective than "
+                f"retrofitting. Early engagement with the project team — often through the "
+                f"development manager or managing agent — is essential. These assets should be "
+                f"contacted immediately."
+            )
+
+    # ── Closing: sales approach ───────────────────────────────────────────────
+    paras.append(approach)
 
     if not paras:
         paras.append(
-            f"Connectivity and infrastructure data has been collected for the {noun} in this territory. "
             f"Run the Full Intelligence option in the source app to enrich the export "
-            f"with EPC, Companies House, and flood risk data for deeper gap analysis."
+            f"with EPC, Companies House, and flood risk data for a more detailed gap analysis."
         )
+
     return paras
+
 
 def _prospect_flags(items, mode):
     scored = []
@@ -657,7 +734,7 @@ def _pdf_cover(story, S, report_title, prepared_by, mode, stats_data):
     story.append(st_t)
     story.append(Spacer(1, 6*mm))
 
-def _pdf_exec_summary(story, S, items, mode, opportunities, area_str, use_ai=False):
+def _pdf_exec_summary(story, S, items, mode, opportunities, area_str):
     story.append(_bar("EXECUTIVE SUMMARY", S))
     story.append(Spacer(1, 4*mm))
 
@@ -665,57 +742,124 @@ def _pdf_exec_summary(story, S, items, mode, opportunities, area_str, use_ai=Fal
     enriched = any(p.get("epc") or p.get("companies") or p.get("flood_risk") for p in items)
     high_opps= sum(1 for o in opportunities if o["priority"]=="High")
 
-    # Build template fallback first
-    flags    = _prospect_flags(items, mode)
+    # Build executive summary paragraphs from data
+    flags       = _prospect_flags(items, mode)
     ofcom_items = [p for p in items if _get_ofcom_flat(p).get("gigabit_pct") is not None]
-    fallback_lines = []
-    fallback_lines.append(
-        f"This report covers digital infrastructure intelligence for {area_str}, "
-        f"profiling {len(items)} {'retail asset' if mode=='retail' else 'science and innovation park'}{'s' if len(items)!=1 else ''}."
-    )
+    epc_items   = [p for p in items if p.get("epc")]
+    flood_items = [p for p in items if p.get("flood_risk","") in ("Zone 3 (High)","Zone 2 (Medium)")]
+
+    if mode == "retail":
+        asset_noun   = "retail asset"
+        audience     = "shopping centre and retail park management teams and their managing agents"
+        service_line = "managed connectivity, Network-as-a-Service, WiredScore and SmartScore AP services, guest WiFi, and managed IT"
+    elif mode == "parks":
+        asset_noun   = "science and innovation park"
+        audience     = "park directors, estates managers, and institutional landlords"
+        service_line = "research-grade managed connectivity, full fibre, Network-as-a-Service, WiredScore AP services, and managed IT"
+    else:
+        asset_noun   = "commercial building"
+        audience     = "building managers and managing agents"
+        service_line = "managed connectivity, WiredScore and SmartScore AP services, managed IT, and cybersecurity"
+
+    exec_paras = []
+
+    # Para 1: Territory overview
+    p1 = (f"This report profiles {len(items)} {asset_noun}{'s' if len(items)!=1 else ''} "
+          f"across {area_str}. ")
     if ofcom_items:
         avg_gig = round(sum(_get_ofcom_flat(p)["gigabit_pct"] for p in ofcom_items)/len(ofcom_items))
-        low_gig = sum(1 for p in ofcom_items if _get_ofcom_flat(p)["gigabit_pct"] < 50)
-        fallback_lines.append(
-            f"Connectivity analysis shows an average gigabit coverage of {avg_gig}% across the territory. "
-            f"{low_gig} of {len(ofcom_items)} {noun} are in areas below the 50% gigabit threshold."
-        )
-    if flags:
-        top3 = ", ".join(p["name"] for p in flags[:3])
-        fallback_lines.append(
-            f"Opportunity scoring identifies {top3} as the highest-priority prospects in this territory."
-        )
-    fallback_lines.append(
-        f"The analysis has identified {len(opportunities)} service opportunities for Modern Networks, "
-        f"of which {high_opps} are high priority."
-    )
-    fallback_text = " ".join(fallback_lines)
+        avg_ff  = round(sum(_get_ofcom_flat(p)["full_fibre_pct"] for p in ofcom_items)/len(ofcom_items))
+        low_gig = [p for p in ofcom_items if _get_ofcom_flat(p)["gigabit_pct"] < 50]
+        if low_gig:
+            p1 += (f"Average gigabit coverage across the territory is {avg_gig}%, with "
+                   f"{len(low_gig)} of {len(ofcom_items)} {'assets' if mode=='retail' else 'parks'} "
+                   f"in areas below the 50% threshold — the point at which connectivity gaps become "
+                   f"a material issue for occupiers and a direct sales conversation for Modern Networks.")
+        else:
+            p1 += (f"Average gigabit coverage is {avg_gig}% and full fibre availability averages {avg_ff}%, "
+                   f"indicating strong underlying infrastructure across the territory. "
+                   f"Where connectivity is already well-provisioned, the primary opportunity "
+                   f"is certification, managed services, and service quality differentiation.")
+    exec_paras.append(p1)
 
-    if use_ai and items and enriched:
-        prompt = _build_ai_exec_prompt(items, mode, area_str, opportunities, enriched)
-        text   = _ai_narrative(prompt, fallback_text)
-        # Split on double newlines or ". " boundaries into paragraphs
-        paras  = [p.strip() for p in text.split("\n\n") if p.strip()]
-        if len(paras) == 1:
-            # Try splitting into ~3 chunks by sentence
-            sentences = text.split(". ")
-            third = max(1, len(sentences)//3)
-            paras = [
-                ". ".join(sentences[:third]) + ".",
-                ". ".join(sentences[third:2*third]) + ".",
-                ". ".join(sentences[2*third:]),
-            ]
-            paras = [p.strip() for p in paras if p.strip()]
-        for para in paras:
-            story.append(Paragraph(para, S["body"]))
-            story.append(Spacer(1, 3*mm))
-        story.append(Paragraph(
-            "AI-assisted narrative — Modern Networks Building Intelligence Platform",
-            S["small"]))
-    else:
-        for line in fallback_lines:
-            story.append(Paragraph(line, S["body"]))
-            story.append(Spacer(1, 3*mm))
+    # Para 2: EPC and infrastructure condition
+    if epc_items:
+        poor_epc = [p for p in epc_items if (p.get("epc") or {}).get("most_common","") in ("D","E","F","G")]
+        good_epc = [p for p in epc_items if (p.get("epc") or {}).get("most_common","") in ("A","B","C")]
+        if poor_epc:
+            names = ", ".join(p.get("name","") for p in poor_epc[:3])
+            tail  = f" and {len(poor_epc)-3} others" if len(poor_epc) > 3 else ""
+            exec_paras.append(
+                f"Energy performance data is available for {len(epc_items)} "
+                f"{'assets' if mode=='retail' else 'parks'} in this territory. "
+                f"{len(poor_epc)} — {names}{tail} — show a most common EPC rating of D or below. "
+                f"With the proposed 2027 commercial minimum of C, these assets face a defined "
+                f"upgrade timeline. A combined connectivity and energy modernisation conversation "
+                f"is the strongest framing at these locations: both involve the same capital "
+                f"decision cycle and the same decision-makers."
+            )
+        elif good_epc:
+            names = ", ".join(p.get("name","") for p in good_epc[:3])
+            exec_paras.append(
+                f"Energy performance data shows {len(good_epc)} of {len(epc_items)} "
+                f"{'assets' if mode=='retail' else 'parks'} — including {names} — rated C or above. "
+                f"Well-maintained building stock with strong EPC ratings is the ideal profile "
+                f"for WiredScore and SmartScore certification: the infrastructure investment "
+                f"case is already present and Modern Networks, as Accredited Professionals, "
+                f"can manage the certification process end to end."
+            )
+
+    # Para 3: Flood risk
+    if flood_items:
+        z3 = [p for p in flood_items if p.get("flood_risk","")=="Zone 3 (High)"]
+        z2 = [p for p in flood_items if p.get("flood_risk","")=="Zone 2 (Medium)"]
+        if z3:
+            names = ", ".join(p.get("name","") for p in z3[:2])
+            exec_paras.append(
+                f"{len(z3)} {'asset is' if len(z3)==1 else 'assets are'} in EA Flood Zone 3 "
+                f"({names}), carrying a high probability of flooding. "
+                f"Network resilience, dual-path routing, and business continuity planning "
+                f"are directly relevant service conversations at these locations. "
+                f"For {audience}, this is a risk management conversation as much as a "
+                f"technology one."
+            )
+        elif z2:
+            names = ", ".join(p.get("name","") for p in z2[:2])
+            exec_paras.append(
+                f"{len(z2)} {'asset sits' if len(z2)==1 else 'assets sit'} in EA Flood Zone 2 "
+                f"({names}). Infrastructure resilience and business continuity planning "
+                f"are relevant conversations, particularly for occupiers with high continuity obligations."
+            )
+
+    # Para 4: Priority prospects
+    if flags:
+        top_flags = flags[:3]
+        top_names = ", ".join(p["name"] for p in top_flags)
+        rationales = "; ".join(
+            f"{p['name']} ({p['rationale']})"
+            for p in top_flags
+        )
+        exec_paras.append(
+            f"Opportunity scoring across connectivity, EPC, flood risk, and occupier density "
+            f"identifies {top_names} as the highest-priority targets in this territory. "
+            f"Specifically: {rationales}. "
+            f"Full rankings and rationale are set out in the Priority Prospects section."
+        )
+
+    # Para 5: Opportunities summary and recommended approach
+    exec_paras.append(
+        f"The analysis identifies {len(opportunities)} service opportunities for Modern Networks "
+        f"across this territory, of which {high_opps} are high priority. "
+        f"Service lines with the strongest fit are {service_line}. "
+        f"The recommended approach for {audience} is research-led: presenting the findings "
+        f"of this report as a value-add intelligence service positions Modern Networks "
+        f"as a knowledgeable partner rather than a vendor, and creates a natural reason "
+        f"to request a meeting without a sales agenda."
+    )
+
+    for para in exec_paras:
+        story.append(Paragraph(para, S["body"]))
+        story.append(Spacer(1, 3*mm))
 
     story.append(PageBreak())
 
@@ -822,29 +966,12 @@ def _pdf_rankings(story, S, items, mode, flags):
     story.append(t)
     story.append(PageBreak())
 
-def _pdf_gap_analysis(story, S, items, mode, area_str="", use_ai=False):
+def _pdf_gap_analysis(story, S, items, mode, area_str=""):
     story.append(_bar("TERRITORY GAP ANALYSIS", S))
     story.append(Spacer(1, 4*mm))
-
-    if use_ai and items:
-        fallback_paras = _gap_narrative(items, mode)
-        fallback_text  = " ".join(fallback_paras)
-        prompt = _build_ai_gap_prompt(items, mode, area_str)
-        text   = _ai_narrative(prompt, fallback_text)
-        paras  = [p.strip() for p in text.split("\n\n") if p.strip()]
-        if not paras:
-            paras = [text]
-        for para in paras:
-            story.append(Paragraph(para, S["body"]))
-            story.append(Spacer(1, 4*mm))
-        story.append(Paragraph(
-            "AI-assisted analysis — Modern Networks Building Intelligence Platform",
-            S["small"]))
-    else:
-        for para in _gap_narrative(items, mode):
-            story.append(Paragraph(para, S["body"]))
-            story.append(Spacer(1, 4*mm))
-
+    for para in _gap_narrative(items, mode):
+        story.append(Paragraph(para, S["body"]))
+        story.append(Spacer(1, 4*mm))
     story.append(PageBreak())
 
 def _pdf_prospect_flags(story, S, flags):
@@ -980,7 +1107,7 @@ def _pdf_appendix(story, S, mode):
         story.append(Spacer(1, 3*mm))
 
 # ── MAIN PDF GENERATOR ─────────────────────────────────────────────────────────
-def generate_pdf(uploads, intel_uploads, mode, report_title, prepared_by, use_ai=False):
+def generate_pdf(uploads, intel_uploads, mode, report_title, prepared_by):
     buf = io.BytesIO()
     S   = _styles()
     doc = SimpleDocTemplate(buf, pagesize=A4, leftMargin=M, rightMargin=M,
@@ -1027,12 +1154,12 @@ def generate_pdf(uploads, intel_uploads, mode, report_title, prepared_by, use_ai
         story.append(PageBreak())
         _pdf_building_intel(story, S, intel_uploads)
     else:
-        _pdf_exec_summary(story, S, items, mode, opps, area_str, use_ai=use_ai)
+        _pdf_exec_summary(story, S, items, mode, opps, area_str)
         for upload in uploads:
             _pdf_asset_table(story, S, upload, mode)
         if enriched and flags:
             _pdf_rankings(story, S, items, mode, flags)
-            _pdf_gap_analysis(story, S, items, mode, area_str=area_str, use_ai=use_ai)
+            _pdf_gap_analysis(story, S, items, mode, area_str=area_str)
             _pdf_prospect_flags(story, S, flags)
 
     _pdf_action_list(story, S, opps)
@@ -1167,37 +1294,17 @@ with col2:
 
         st.divider()
 
-        has_ai_key = bool(st.secrets.get("GEMINI_API_KEY","")) if hasattr(st,"secrets") else False
-        if has_ai_key:
-            st.success("✓ Gemini API key loaded")
-        else:
-            st.warning("Gemini API key not set — AI narrative unavailable. Add GEMINI_API_KEY to secrets.")
-
-        use_ai = st.toggle("✨ AI-powered narrative (executive summary & gap analysis)",
-                           value=has_ai_key,
-                           disabled=not has_ai_key,
-                           help="Uses Google Gemini to write the executive summary and gap analysis. Requires GEMINI_API_KEY in Streamlit secrets.")
-
         if st.button("⬇ Generate Report", type="primary", use_container_width=True):
             if not report_title:
                 st.warning("Please enter a report title first.")
             else:
-                spinner_msg = "Building report with AI narrative…" if use_ai else "Building report…"
-                with st.spinner(spinner_msg):
+                with st.spinner("Building report…"):
                     pdf_bytes = generate_pdf(
                         asset_ups, intel_ups, mode_key,
-                        report_title, prepared_by or "MN Staff",
-                        use_ai=use_ai
+                        report_title, prepared_by or "MN Staff"
                     )
                 safe = report_title.replace(" ","-").replace("/","-")
                 st.download_button("⬇ Download Report", data=pdf_bytes,
                     file_name=f"MN-{mode_key.title()}-{safe}-{datetime.now().strftime('%Y%m%d')}.pdf",
                     mime="application/pdf", use_container_width=True)
-                if use_ai:
-                    err = st.session_state.get("ai_last_error","")
-                    if err:
-                        st.warning(f"AI narrative fell back to template — {err}")
-                    else:
-                        st.success("Report generated with AI narrative.")
-                else:
-                    st.success("Report generated.")
+                st.success("Report generated.")
