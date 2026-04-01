@@ -553,6 +553,45 @@ def _gap_narrative(items, mode):
                 f"contacted immediately."
             )
 
+    # ── Investment activity ───────────────────────────────────────────────────
+    active_invest = [(p, p.get("investment_activity","")) for p in items
+                     if p.get("investment_activity") and len(p.get("investment_activity","")) > 30]
+    if active_invest:
+        invest_names = ", ".join(p.get("name","") for p,_ in active_invest[:4])
+        paras.append(
+            f"A number of assets in this territory have active investment or repositioning programmes "
+            f"underway — {invest_names}. "
+            f"Active capital expenditure programmes are the strongest possible signal for infrastructure "
+            f"conversations: decisions are being made now about what goes into the building, "
+            f"and specifying connectivity infrastructure as part of a wider investment programme "
+            f"is far more cost-effective than retrofitting later. "
+            f"These assets should be prioritised for immediate outreach."
+        )
+
+    # ── Managing agents ───────────────────────────────────────────────────────
+    agents = {}
+    for p in items:
+        agent = (p.get("managing_agent") or "").strip()
+        if agent and agent.lower() not in ("","—"):
+            if agent not in agents:
+                agents[agent] = []
+            agents[agent].append(p.get("name",""))
+    if agents:
+        agent_summary = "; ".join(
+            f"{agent} ({', '.join(names[:2])}{'...' if len(names)>2 else ''})"
+            for agent, names in list(agents.items())[:4]
+        )
+        paras.append(
+            f"In terms of approach, managing agents control access to a significant proportion of "
+            f"this territory: {agent_summary}. "
+            f"Where assets are professionally managed, approaching through the agent relationship "
+            f"is typically more effective than going direct to the landlord — "
+            f"agents have the operational relationship with the asset and are often the "
+            f"first point of contact for infrastructure and services decisions. "
+            f"Modern Networks' existing relationships with CBRE, JLL, Savills, and Cushman & Wakefield "
+            f"should be leveraged where relevant."
+        )
+
     # ── Closing: sales approach ───────────────────────────────────────────────
     paras.append(approach)
 
