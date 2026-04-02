@@ -2,6 +2,8 @@ import streamlit as st
 import json
 import io
 import requests
+import os
+import glob
 
 # ── AI NARRATIVE ───────────────────────────────────────────────────────────────
 def _build_ai_exec_prompt(items, mode, area_str, opportunities, enriched):
@@ -353,7 +355,7 @@ def _get_items(uploads):
     return items
 
 # ── NARRATIVE GENERATORS ───────────────────────────────────────────────────────
-def _gap_narrative(items, mode):
+def _gap_narrative(items, mode, library_context=""):
     """
     Return a list of commercially focused paragraph strings for the gap analysis.
     Each paragraph is specific, names assets, and connects data to sales conversations.
@@ -592,6 +594,20 @@ def _gap_narrative(items, mode):
             f"should be leveraged where relevant."
         )
 
+    # ── Library context ──────────────────────────────────────────────────────
+    if library_context:
+        paras.append(
+            "The following market intelligence provides additional context for this territory analysis."
+        )
+        # Extract key sentences from library context — look for numbers and named locations
+        import re
+        sentences = re.split(r"(?<=[.!?])\s+", library_context)
+        useful = [s.strip() for s in sentences
+                  if len(s) > 60 and any(c.isdigit() for c in s)
+                  and not s.startswith("[Document")][:6]
+        if useful:
+            paras.append(" ".join(useful))
+
     # ── Closing: sales approach ───────────────────────────────────────────────
     paras.append(approach)
 
@@ -744,6 +760,94 @@ def _build_opps_intel(intel_uploads):
                     "reason":g.get("desc","")[:120]})
     opps.sort(key=lambda x: (0 if x["priority"]=="High" else 1, x["property"]))
     return opps
+
+
+# ── DOCUMENT LIBRARY ───────────────────────────────────────────────────────────
+LIBRARY_PATH = "library"
+
+def _library_files():
+    """Return list of PDF files in the library folder."""
+    if not os.path.exists(LIBRARY_PATH):
+        return []
+    return sorted(glob.glob(os.path.join(LIBRARY_PATH, "*.pdf")) +
+                  glob.glob(os.path.join(LIBRARY_PATH, "*.txt")))
+
+def _extract_text_from_pdf(filepath):
+    """Extract text from a PDF using pypdf. Returns empty string on failure."""
+    try:
+        import pypdf
+        text_parts = []
+        with open(filepath, "rb") as f:
+            reader = pypdf.PdfReader(f)
+            for page in reader.pages[:20]:  # cap at 20 pages per doc
+                t = page.extract_text()
+                if t:
+                    text_parts.append(t)
+        return "\n".join(text_parts)
+    except Exception:
+        return ""
+
+def _extract_text_from_txt(filepath):
+    """Read a plain text file."""
+    try:
+        with open(filepath, "r", encoding="utf-8", errors="ignore") as f:
+            return f.read()
+    except Exception:
+        return ""
+
+def _load_library_context(mode):
+    """
+    Load all library documents and return a combined context string
+    relevant to the given mode (retail, parks, intel).
+    Truncates to keep prompt size manageable.
+    """
+    files = _library_files()
+    if not files:
+        return ""
+
+    mode_keywords = {
+        "retail":  ["retail", "shopping", "centre", "park", "footfall", "landlord",
+                    "leisure", "outlet", "high street", "occupier", "tenant"],
+        "parks":   ["science", "innovation", "park", "research", "technology",
+                    "campus", "tenant", "university", "cluster"],
+        "intel":   ["office", "commercial", "building", "workspace", "occupier",
+                    "wiredScore", "connectivity", "lease"],
+    }
+    keywords = mode_keywords.get(mode, [])
+
+    context_parts = []
+    total_chars   = 0
+    max_chars     = 8000  # keep total context under ~2000 tokens
+
+    for filepath in files:
+        if total_chars >= max_chars:
+            break
+        fname = os.path.basename(filepath)
+        if filepath.endswith(".pdf"):
+            text = _extract_text_from_pdf(filepath)
+        else:
+            text = _extract_text_from_txt(filepath)
+
+        if not text:
+            continue
+
+        # Score relevance by keyword hits in first 2000 chars
+        preview = text[:2000].lower()
+        score   = sum(1 for kw in keywords if kw.lower() in preview)
+
+        if score > 0 or len(files) <= 3:
+            # Take first 2000 chars of this doc as context
+            snippet = text[:2000].strip()
+            context_parts.append(f"[Document: {fname}]\n{snippet}")
+            total_chars += len(snippet)
+
+    if not context_parts:
+        return ""
+
+    return ("The following market intelligence documents are available as background context. "
+            "Use specific data points, statistics, or observations from these documents "
+            "where they strengthen your analysis:\n\n" +
+            "\n\n---\n\n".join(context_parts))
 
 # ── PDF BUILDERS ───────────────────────────────────────────────────────────────
 def _pdf_cover(story, S, report_title, prepared_by, mode, stats_data):
@@ -1008,9 +1112,14 @@ def _pdf_rankings(story, S, items, mode, flags):
 def _pdf_gap_analysis(story, S, items, mode, area_str=""):
     story.append(_bar("TERRITORY GAP ANALYSIS", S))
     story.append(Spacer(1, 4*mm))
-    for para in _gap_narrative(items, mode):
+    library_context = _load_library_context(mode)
+    for para in _gap_narrative(items, mode, library_context=library_context):
         story.append(Paragraph(para, S["body"]))
         story.append(Spacer(1, 4*mm))
+    if library_context:
+        story.append(Paragraph(
+            "Market context drawn from document library — Modern Networks Intelligence Platform",
+            S["small"]))
     story.append(PageBreak())
 
 def _pdf_prospect_flags(story, S, flags):
@@ -1218,7 +1327,53 @@ st.markdown("""
 </div>
 """, unsafe_allow_html=True)
 
-col1, col2 = st.columns([1, 2])
+tab_report, tab_library = st.tabs(["📊 Generate Report", "📚 Document Library"])
+
+with tab_library:
+    st.markdown("### Document Library")
+    st.markdown(
+        "Upload PDF market reports, research papers, or briefing documents here. "
+        "To add documents permanently, upload them to the `library/` folder in GitHub. "
+        "The app will use relevant context from these documents when generating reports."
+    )
+    st.divider()
+
+    lib_files = _library_files()
+    if lib_files:
+        st.markdown(f"**{len(lib_files)} document{'s' if len(lib_files)!=1 else ''} in library:**")
+        for fp in lib_files:
+            fname = os.path.basename(fp)
+            size  = os.path.getsize(fp)
+            size_str = f"{size/1024:.0f} KB" if size < 1024*1024 else f"{size/1024/1024:.1f} MB"
+            col_a, col_b = st.columns([4, 1])
+            col_a.markdown(f"📄 **{fname}** — {size_str}")
+            if col_b.button("Preview", key=f"prev_{fname}"):
+                if fname.endswith(".pdf"):
+                    text = _extract_text_from_pdf(fp)
+                else:
+                    text = _extract_text_from_txt(fp)
+                st.text_area(f"First 1000 chars of {fname}", text[:1000], height=200)
+    else:
+        st.info(
+            "No documents in library yet. "
+            "Create a `library/` folder in your mn-master-report GitHub repo "
+            "and upload PDF files there. "
+            "Suitable documents include: BRC footfall reports, Savills/JLL/CBRE retail market "
+            "outlooks, CoStar market data, investment volume reports, and your own research notes."
+        )
+
+    st.divider()
+    st.markdown("**How to add documents:**")
+    st.markdown(
+        "1. Go to your **mn-master-report** GitHub repo  \n"
+        "2. Click **Add file** then **Upload files**  \n"
+        "3. Upload your PDF — it must go into the **library/** folder  \n"
+        "   *(create the folder by typing library/ before the filename)*  \n"
+        "4. Commit the file — the app picks it up automatically"
+    )
+
+with tab_report:
+    col1, col2 = st.columns([1, 2])
 
 with col1:
     st.markdown("### Report Settings")
