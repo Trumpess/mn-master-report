@@ -782,9 +782,49 @@ def _extract_text_from_pdf(filepath):
                 t = page.extract_text()
                 if t:
                     text_parts.append(t)
-        return "\n".join(text_parts)
+        raw = "\n".join(text_parts)
+        return _clean_extracted_text(raw)
     except Exception:
         return ""
+
+def _clean_extracted_text(text):
+    """
+    Strip web-page chrome and PDF artefacts from extracted text.
+    Removes navigation, share buttons, timestamps, URLs, and other noise
+    that appears when a web page is saved as PDF.
+    """
+    import re
+    lines = text.splitlines()
+    clean = []
+    skip_phrases = [
+        "listen to article", "read time:", "convert to pdf", "share your feedback",
+        "chat now", "ask a question", "privacy statement", "cookie", "subscribe",
+        "sign up", "log in", "login", "register", "download pdf", "view all",
+        "back to top", "follow us", "contact us", "terms of service",
+        "all rights reserved", "copyright", "https://", "http://",
+        "jll processes your personal data",
+        "share this article", "get in touch", "find out more",
+        "click here", "read more", "see more", "view more",
+    ]
+    for line in lines:
+        stripped = line.strip()
+        if not stripped:
+            continue
+        # Skip very short lines (likely headers/nav)
+        if len(stripped) < 30:
+            continue
+        # Skip lines that are mostly numbers/dates (page numbers, timestamps)
+        if re.match(r"^[\d/:\s\.,-]+$", stripped):
+            continue
+        # Skip lines containing web chrome phrases
+        lower = stripped.lower()
+        if any(phrase in lower for phrase in skip_phrases):
+            continue
+        # Skip lines that look like URLs
+        if re.search(r"www\.|https?://|\.com|\.co\.uk", stripped):
+            continue
+        clean.append(stripped)
+    return " ".join(clean)
 
 def _extract_text_from_txt(filepath):
     """Read a plain text file."""
@@ -799,25 +839,48 @@ def _load_library_context(mode):
     Load library documents relevant to the given mode.
     Uses strict keyword matching to exclude off-topic documents.
     Returns a list of (filename, relevant_sentences) tuples.
+    Results are cached in session_state to avoid re-extracting PDFs on every rerun.
     """
+    cache_key = f"lib_cache_{mode}"
+    # Use cached result if available and library hasn't changed
     files = _library_files()
+    file_sig = str(sorted([(os.path.basename(f), os.path.getmtime(f)) for f in files]))
+    sig_key  = f"lib_sig_{mode}"
+    if (cache_key in st.session_state and
+        st.session_state.get(sig_key) == file_sig):
+        return st.session_state[cache_key]
+
     if not files:
+        st.session_state[cache_key] = []
+        st.session_state[sig_key]   = file_sig
         return []
 
     import re
 
-    # Required keywords — document must contain AT LEAST ONE of these to qualify
+    # Required keywords — document must contain AT LEAST 2 of these to qualify
     # These are distinctive enough that they won't cross-contaminate modes
     mode_required = {
         "retail":  ["shopping centre", "shopping center", "retail park", "high street",
                     "footfall", "anchor tenant", "shopping destination", "retail investment",
-                    "retailer", "leasing market", "vacancy rate"],
+                    "centre vacancy", "centre footfall", "shopping centre investment"],
         "parks":   ["science park", "innovation park", "life science", "life sciences",
-                    "laboratory", "lab space", "research campus", "golden triangle",
-                    "biomedical", "deep tech", "innovation location", "incubator"],
-        "intel":   ["office market", "office space", "office leasing", "commercial office",
-                    "wiredScore", "flex office", "managed workspace", "serviced office",
-                    "grade a office", "take-up", "office occupier"],
+                    "laboratory space", "lab space", "research campus", "golden triangle",
+                    "biomedical", "innovation location", "science-related real estate"],
+        "intel":   ["office market", "office leasing", "commercial office",
+                    "flex office", "managed workspace", "serviced office",
+                    "grade a office", "office take-up", "office occupier",
+                    "office vacancy", "office investment"],
+    }
+
+    # Explicit exclusion — if document contains ANY of these, skip for this mode
+    mode_exclude = {
+        "retail":  ["office market", "office leasing", "office take-up", "science park",
+                    "laboratory", "research campus", "office occupier", "office vacancy",
+                    "shifting landscape of uk offices", "uk office market"],
+        "parks":   ["shopping centre", "retail park", "footfall", "anchor tenant",
+                    "office market", "office leasing", "office vacancy"],
+        "intel":   ["shopping centre", "retail park", "footfall", "science park",
+                    "laboratory", "research campus"],
     }
 
     # Bonus keywords — increase relevance score but not required
@@ -847,9 +910,14 @@ def _load_library_context(mode):
 
         text_lower = text.lower()
 
-        # Must match at least one required keyword — otherwise skip entirely
+        # Check exclusion keywords first — if any match, skip this doc for this mode
+        exclude_kws = mode_exclude.get(mode, [])
+        if any(kw.lower() in text_lower for kw in exclude_kws):
+            continue
+
+        # Must match at least 2 required keywords — raises bar above accidental matches
         required_hits = [kw for kw in required_kws if kw.lower() in text_lower]
-        if not required_hits:
+        if len(required_hits) < 2:
             continue
 
         # Score by bonus keyword hits across full text
@@ -892,7 +960,11 @@ def _load_library_context(mode):
 
     # Sort by relevance descending
     results.sort(key=lambda x: -x["relevance"])
-    return results[:4]  # max 4 documents
+    final = results[:4]  # max 4 documents
+    # Cache result
+    st.session_state[cache_key] = final
+    st.session_state[sig_key]   = file_sig
+    return final
 
 # ── PDF BUILDERS ───────────────────────────────────────────────────────────────
 def _pdf_cover(story, S, report_title, prepared_by, mode, stats_data):
