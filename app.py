@@ -596,17 +596,16 @@ def _gap_narrative(items, mode, library_context=""):
 
     # ── Library context ──────────────────────────────────────────────────────
     if library_context:
-        paras.append(
-            "The following market intelligence provides additional context for this territory analysis."
-        )
-        # Extract key sentences from library context — look for numbers and named locations
-        import re
-        sentences = re.split(r"(?<=[.!?])\s+", library_context)
-        useful = [s.strip() for s in sentences
-                  if len(s) > 60 and any(c.isdigit() for c in s)
-                  and not s.startswith("[Document")][:6]
-        if useful:
-            paras.append(" ".join(useful))
+        for doc in library_context:
+            sentences = doc.get("sentences", [])
+            fname     = doc.get("fname", "")
+            if not sentences:
+                continue
+            # Build a paragraph of the most useful data points from this document
+            doc_name = fname.replace("-", " ").replace("_", " ").replace(".pdf", "").replace(".txt", "").title()
+            intro = f"Market context from {doc_name}:"
+            body  = " ".join(sentences[:5])
+            paras.append(f"{intro} {body}")
 
     # ── Closing: sales approach ───────────────────────────────────────────────
     paras.append(approach)
@@ -797,57 +796,103 @@ def _extract_text_from_txt(filepath):
 
 def _load_library_context(mode):
     """
-    Load all library documents and return a combined context string
-    relevant to the given mode (retail, parks, intel).
-    Truncates to keep prompt size manageable.
+    Load library documents relevant to the given mode.
+    Uses strict keyword matching to exclude off-topic documents.
+    Returns a list of (filename, relevant_sentences) tuples.
     """
     files = _library_files()
     if not files:
-        return ""
+        return []
 
-    mode_keywords = {
-        "retail":  ["retail", "shopping", "centre", "park", "footfall", "landlord",
-                    "leisure", "outlet", "high street", "occupier", "tenant"],
-        "parks":   ["science", "innovation", "park", "research", "technology",
-                    "campus", "tenant", "university", "cluster"],
-        "intel":   ["office", "commercial", "building", "workspace", "occupier",
-                    "wiredScore", "connectivity", "lease"],
+    import re
+
+    # Required keywords — document must contain AT LEAST ONE of these to qualify
+    # These are distinctive enough that they won't cross-contaminate modes
+    mode_required = {
+        "retail":  ["shopping centre", "shopping center", "retail park", "high street",
+                    "footfall", "anchor tenant", "shopping destination", "retail investment",
+                    "retailer", "leasing market", "vacancy rate"],
+        "parks":   ["science park", "innovation park", "life science", "life sciences",
+                    "laboratory", "lab space", "research campus", "golden triangle",
+                    "biomedical", "deep tech", "innovation location", "incubator"],
+        "intel":   ["office market", "office space", "office leasing", "commercial office",
+                    "wiredScore", "flex office", "managed workspace", "serviced office",
+                    "grade a office", "take-up", "office occupier"],
     }
-    keywords = mode_keywords.get(mode, [])
 
-    context_parts = []
-    total_chars   = 0
-    max_chars     = 8000  # keep total context under ~2000 tokens
+    # Bonus keywords — increase relevance score but not required
+    mode_bonus = {
+        "retail":  ["investment volume", "yield", "prime rent", "vacancy", "occupier",
+                    "landlord", "centre director", "managing agent", "leisure"],
+        "parks":   ["university", "research", "technology", "cluster", "campus",
+                    "innovation", "tenant company", "knowledge"],
+        "intel":   ["office", "building", "lease", "epc", "workspace", "occupier",
+                    "wiredScore", "smartScore", "commercial property"],
+    }
+
+    required_kws = mode_required.get(mode, [])
+    bonus_kws    = mode_bonus.get(mode, [])
+
+    results = []
 
     for filepath in files:
-        if total_chars >= max_chars:
-            break
         fname = os.path.basename(filepath)
         if filepath.endswith(".pdf"):
             text = _extract_text_from_pdf(filepath)
         else:
             text = _extract_text_from_txt(filepath)
 
-        if not text:
+        if not text or len(text) < 200:
             continue
 
-        # Score relevance by keyword hits in first 2000 chars
-        preview = text[:2000].lower()
-        score   = sum(1 for kw in keywords if kw.lower() in preview)
+        text_lower = text.lower()
 
-        if score > 0 or len(files) <= 3:
-            # Take first 2000 chars of this doc as context
-            snippet = text[:2000].strip()
-            context_parts.append(f"[Document: {fname}]\n{snippet}")
-            total_chars += len(snippet)
+        # Must match at least one required keyword — otherwise skip entirely
+        required_hits = [kw for kw in required_kws if kw.lower() in text_lower]
+        if not required_hits:
+            continue
 
-    if not context_parts:
-        return ""
+        # Score by bonus keyword hits across full text
+        bonus_score = sum(1 for kw in bonus_kws if kw.lower() in text_lower)
+        relevance   = len(required_hits) * 3 + bonus_score
 
-    return ("The following market intelligence documents are available as background context. "
-            "Use specific data points, statistics, or observations from these documents "
-            "where they strengthen your analysis:\n\n" +
-            "\n\n---\n\n".join(context_parts))
+        # Extract the most data-rich sentences — those with % figures or £ amounts
+        sentences = re.split(r"(?<=[.!?])\s+", text)
+        data_sentences = []
+        for s in sentences:
+            s = s.strip()
+            # Skip very short, header-like, or garbled PDF extraction lines
+            if len(s) < 50 or len(s) > 500:
+                continue
+            if s.count(" ") < 5:
+                continue
+            # Prioritise sentences with specific data
+            has_pct   = "%" in s
+            has_money = "£" in s or "billion" in s.lower() or "million" in s.lower()
+            has_year  = any(y in s for y in ["2024", "2025", "2026", "2027"])
+            if has_pct or has_money or has_year:
+                data_sentences.append(s)
+
+        # Deduplicate and take the best
+        seen = set()
+        unique_sentences = []
+        for s in data_sentences:
+            key = s[:60].lower()
+            if key not in seen:
+                seen.add(key)
+                unique_sentences.append(s)
+
+        if unique_sentences or required_hits:
+            results.append({
+                "fname":      fname,
+                "relevance":  relevance,
+                "sentences":  unique_sentences[:8],  # cap per document
+                "req_hits":   required_hits,
+            })
+
+    # Sort by relevance descending
+    results.sort(key=lambda x: -x["relevance"])
+    return results[:4]  # max 4 documents
 
 # ── PDF BUILDERS ───────────────────────────────────────────────────────────────
 def _pdf_cover(story, S, report_title, prepared_by, mode, stats_data):
@@ -1112,13 +1157,14 @@ def _pdf_rankings(story, S, items, mode, flags):
 def _pdf_gap_analysis(story, S, items, mode, area_str=""):
     story.append(_bar("TERRITORY GAP ANALYSIS", S))
     story.append(Spacer(1, 4*mm))
-    library_context = _load_library_context(mode)
-    for para in _gap_narrative(items, mode, library_context=library_context):
+    library_docs = _load_library_context(mode)
+    for para in _gap_narrative(items, mode, library_context=library_docs):
         story.append(Paragraph(para, S["body"]))
         story.append(Spacer(1, 4*mm))
-    if library_context:
+    if library_docs:
+        doc_names = ", ".join(d["fname"].replace(".pdf","").replace(".txt","") for d in library_docs)
         story.append(Paragraph(
-            "Market context drawn from document library — Modern Networks Intelligence Platform",
+            f"Market context sources: {doc_names}",
             S["small"]))
     story.append(PageBreak())
 
@@ -1341,12 +1387,26 @@ with tab_library:
     lib_files = _library_files()
     if lib_files:
         st.markdown(f"**{len(lib_files)} document{'s' if len(lib_files)!=1 else ''} in library:**")
+
+        # Show which docs are relevant to which modes
+        mode_labels = {"retail": "🏬 Retail", "parks": "🔬 Science Parks", "intel": "🏢 Buildings"}
+        relevance_map = {}
+        for m in ["retail", "parks", "intel"]:
+            matched = _load_library_context(m)
+            for doc in matched:
+                fn = doc["fname"]
+                if fn not in relevance_map:
+                    relevance_map[fn] = []
+                relevance_map[fn].append(mode_labels[m])
+
         for fp in lib_files:
             fname = os.path.basename(fp)
             size  = os.path.getsize(fp)
             size_str = f"{size/1024:.0f} KB" if size < 1024*1024 else f"{size/1024/1024:.1f} MB"
+            modes_matched = relevance_map.get(fname, [])
+            mode_str = "  ·  ".join(modes_matched) if modes_matched else "⚠ No mode match — document may not be used"
             col_a, col_b = st.columns([4, 1])
-            col_a.markdown(f"📄 **{fname}** — {size_str}")
+            col_a.markdown("📄 **" + fname + "** — " + size_str + "  \n*Used for: " + mode_str + "*")
             if col_b.button("Preview", key=f"prev_{fname}"):
                 if fname.endswith(".pdf"):
                     text = _extract_text_from_pdf(fp)
